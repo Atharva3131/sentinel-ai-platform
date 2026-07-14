@@ -4,23 +4,9 @@ from __future__ import annotations
 
 from azure.cosmos.aio import DatabaseProxy
 from azure.storage.blob.aio import BlobServiceClient
-from neo4j import AsyncDriver
-from redis.asyncio import Redis
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
 
-
-class PostgresHealthCheck:
-    """Verify that PostgreSQL accepts a minimal query."""
-
-    name = "postgresql"
-
-    def __init__(self, engine: AsyncEngine) -> None:
-        self._engine = engine
-
-    async def check(self) -> None:
-        async with self._engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+from backend.infrastructure.neo4j import Neo4jConnection
+from backend.infrastructure.redis import RedisConnection
 
 
 class RedisHealthCheck:
@@ -28,11 +14,11 @@ class RedisHealthCheck:
 
     name = "redis"
 
-    def __init__(self, client: Redis) -> None:
-        self._client = client
+    def __init__(self, connection: RedisConnection) -> None:
+        self._connection = connection
 
     async def check(self) -> None:
-        if not await self._client.ping():
+        if not await self._connection.ping():
             raise ConnectionError("Redis ping did not return success")
 
 
@@ -41,11 +27,11 @@ class Neo4jHealthCheck:
 
     name = "neo4j"
 
-    def __init__(self, driver: AsyncDriver) -> None:
-        self._driver = driver
+    def __init__(self, connection: Neo4jConnection) -> None:
+        self._connection = connection
 
     async def check(self) -> None:
-        await self._driver.verify_connectivity()
+        await self._connection.verify_connectivity()
 
 
 class CosmosHealthCheck:

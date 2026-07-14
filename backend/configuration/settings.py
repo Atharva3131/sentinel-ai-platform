@@ -163,6 +163,8 @@ class CosmosSettings(BaseModel):
     enabled: bool = False
     endpoint: str | None = None
     database_name: str = "sentinel"
+    container_name: str = "sentinel"
+    partition_key_path: str = "/partitionKey"
     connection_string: SecretStr | None = None
     preferred_locations: list[str] = Field(default_factory=list)
 

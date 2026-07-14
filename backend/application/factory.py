@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
 import structlog
+from dishka import Provider
+from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from backend.api.router import build_api_router
-from backend.application.container import ApplicationContainer
+from backend.application.providers import build_root_container
 from backend.configuration import AppSettings, get_settings
 from backend.logging import configure_logging
 from backend.middleware import ExceptionLoggingMiddleware, RequestContextMiddleware
 from backend.telemetry import TelemetryHandle, configure_telemetry
 
 
-def create_application(settings: AppSettings | None = None) -> FastAPI:
+def create_application(
+    settings: AppSettings | None = None,
+    *,
+    override_providers: Sequence[Provider] | None = None,
+) -> FastAPI:
     """Create a fully composed application without performing network I/O."""
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.logging)
@@ -25,23 +32,28 @@ def create_application(settings: AppSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        container = ApplicationContainer.build(resolved_settings)
-        app.state.container = container
-        if telemetry is not None:
-            telemetry.instrument_sqlalchemy(container.sqlalchemy_engine)
-        logger.info(
-            "application_started",
-            service=resolved_settings.app_name,
-            version=resolved_settings.app_version,
-            environment=resolved_settings.environment.value,
+        root_container = build_root_container(
+            resolved_settings,
+            telemetry=telemetry or TelemetryHandle(),
+            override_providers=tuple(override_providers or ()),
         )
-        try:
-            yield
-        finally:
-            await container.close()
+        async with root_container as app_container:
+            setup_dishka(app_container, app)
+            engine = await app_container.get(AsyncEngine)
             if telemetry is not None:
-                await telemetry.shutdown()
-            logger.info("application_stopped", service=resolved_settings.app_name)
+                telemetry.instrument_sqlalchemy(engine)
+            logger.info(
+                "application_started",
+                service=resolved_settings.app_name,
+                version=resolved_settings.app_version,
+                environment=resolved_settings.environment.value,
+            )
+            try:
+                yield
+            finally:
+                if telemetry is not None:
+                    await telemetry.shutdown()
+                logger.info("application_stopped", service=resolved_settings.app_name)
 
     app = FastAPI(
         title="Sentinel AI Platform API",
