@@ -11,6 +11,8 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
+from backend.telemetry import bind_request_context, detach_request_context
+
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _logger = structlog.get_logger(__name__)
 
@@ -45,8 +47,15 @@ class RequestContextMiddleware:
         if execution_id is not None:
             context_tokens["execution_id"] = execution_id
         bind_contextvars(**context_tokens)
+        telemetry_token = bind_request_context(
+            correlation_id=correlation_id,
+            request_id=request_id,
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+        )
         started = time.perf_counter()
         status_code = 500
+        app = scope.get("app")
 
         async def send_with_context(message: Message) -> None:
             nonlocal status_code
@@ -64,6 +73,7 @@ class RequestContextMiddleware:
         try:
             await self.app(scope, receive, send_with_context)
         finally:
+            telemetry = getattr(getattr(app, "state", None), "telemetry", None)
             _logger.info(
                 "http_request_completed",
                 method=scope.get("method"),
@@ -71,4 +81,15 @@ class RequestContextMiddleware:
                 status_code=status_code,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
+            if telemetry is not None:
+                telemetry.record_http_request(
+                    method=scope.get("method"),
+                    path=scope.get("path"),
+                    status_code=status_code,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    correlation_id=correlation_id,
+                    workflow_id=workflow_id,
+                    execution_id=execution_id,
+                )
+            detach_request_context(telemetry_token)
             clear_contextvars()

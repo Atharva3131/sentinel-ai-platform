@@ -54,8 +54,9 @@ class ApplicationProvider(Provider):
     async def application_container(
         self,
         settings: AppSettings,
+        telemetry: TelemetryHandle,
     ) -> AsyncIterator[ApplicationContainer]:
-        container = ApplicationContainer.build(settings)
+        container = ApplicationContainer.build_with_telemetry(settings, telemetry)
         try:
             yield container
         finally:

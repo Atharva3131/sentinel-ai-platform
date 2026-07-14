@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from backend.interfaces.health import HealthCheck, HealthCheckResult, HealthStatus
+from backend.telemetry import TelemetryHandle
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,9 +22,15 @@ class ReadinessReport:
 class HealthService:
     """Run bounded dependency checks concurrently."""
 
-    def __init__(self, checks: Iterable[HealthCheck], timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        checks: Iterable[HealthCheck],
+        timeout_seconds: float,
+        telemetry: TelemetryHandle | None = None,
+    ) -> None:
         self._checks = tuple(checks)
         self._timeout_seconds = timeout_seconds
+        self._telemetry = telemetry
 
     async def readiness(self) -> ReadinessReport:
         """Return readiness only when every configured dependency is healthy."""
@@ -39,10 +46,16 @@ class HealthService:
             async with asyncio.timeout(self._timeout_seconds):
                 await check.check()
         except TimeoutError:
-            return self._result(check.name, HealthStatus.DOWN, started, "timeout")
+            result = self._result(check.name, HealthStatus.DOWN, started, "timeout")
+            self._record(result)
+            return result
         except Exception as exc:  # Dependency failures are normalized at this boundary.
-            return self._result(check.name, HealthStatus.DOWN, started, type(exc).__name__)
-        return self._result(check.name, HealthStatus.UP, started)
+            result = self._result(check.name, HealthStatus.DOWN, started, type(exc).__name__)
+            self._record(result)
+            return result
+        result = self._result(check.name, HealthStatus.UP, started)
+        self._record(result)
+        return result
 
     @staticmethod
     def _result(
@@ -51,9 +64,19 @@ class HealthService:
         started: float,
         detail: str | None = None,
     ) -> HealthCheckResult:
-        return HealthCheckResult(
+        result = HealthCheckResult(
             name=name,
             status=status,
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
             detail=detail,
+        )
+        return result
+
+    def _record(self, result: HealthCheckResult) -> None:
+        if self._telemetry is None:
+            return
+        self._telemetry.record_health_check(
+            name=result.name,
+            status=result.status.value,
+            duration_ms=result.latency_ms,
         )

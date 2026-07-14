@@ -14,6 +14,7 @@ This document records the baseline architectural decisions. Each subsequent mate
 | ADR-008 | Make audit and observability first-class. | Autonomous operations need explanation, support, and compliance evidence. | Correlation and redaction are mandatory across modules. |
 | ADR-009 | Deploy stateless containers around managed stateful services. | Enables independent scaling, restart safety, and cloud portability. | Durable state/checkpoints must be complete and tested. |
 | ADR-010 | Start on managed Azure containers; preserve Kubernetes portability. | Reduces initial control-plane burden without foreclosing future scale. | Images, probes, configuration, and workers remain orchestration-neutral. |
+| ADR-011 | Keep LLM, embedding, retrieval, and tool execution behind internal provider ports. | Model and tool frameworks should be swappable without leaking into services or workflows. | LangChain and provider SDKs become edge adapters; internal code depends on stable contracts only. |
 
 ## ADR Template
 

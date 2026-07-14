@@ -48,6 +48,7 @@ from backend.queues.redis import (
     RedisRetryQueue,
     RedisStreamClient,
 )
+from backend.telemetry import TelemetryHandle
 
 
 @dataclass(slots=True)
@@ -85,6 +86,16 @@ class ApplicationContainer:
     @classmethod
     def build(cls, settings: AppSettings) -> ApplicationContainer:
         """Construct lazy clients without performing network I/O."""
+        # Telemetry handle is injected by the provider at app scope.
+        return cls.build_with_telemetry(settings, telemetry=None)
+
+    @classmethod
+    def build_with_telemetry(
+        cls,
+        settings: AppSettings,
+        telemetry: TelemetryHandle | None,
+    ) -> ApplicationContainer:
+        """Construct lazy clients and bind optional telemetry recorders."""
         retry_policy = RetryPolicy()
         engine = create_postgres_engine(settings.postgres)
         session_factory = create_session_factory(engine)
@@ -163,7 +174,11 @@ class ApplicationContainer:
                 )
             checks.append(BlobHealthCheck(blob_client))
 
-        health_service = HealthService(checks, settings.health.dependency_timeout_seconds)
+        health_service = HealthService(
+            checks,
+            settings.health.dependency_timeout_seconds,
+            telemetry=telemetry,
+        )
         return cls(
             settings=settings,
             sqlalchemy_engine=engine,
