@@ -12,7 +12,7 @@ from backend.api.router import build_api_router
 from backend.application.container import ApplicationContainer
 from backend.configuration import AppSettings, get_settings
 from backend.logging import configure_logging
-from backend.middleware import RequestContextMiddleware
+from backend.middleware import ExceptionLoggingMiddleware, RequestContextMiddleware
 from backend.telemetry import TelemetryHandle, configure_telemetry
 
 
@@ -33,7 +33,7 @@ def create_application(settings: AppSettings | None = None) -> FastAPI:
             "application_started",
             service=resolved_settings.app_name,
             version=resolved_settings.app_version,
-            environment=resolved_settings.environment,
+            environment=resolved_settings.environment.value,
         )
         try:
             yield
@@ -52,6 +52,7 @@ def create_application(settings: AppSettings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if not resolved_settings.is_production else None,
         lifespan=lifespan,
     )
+    app.add_middleware(ExceptionLoggingMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(build_api_router())
     telemetry = configure_telemetry(resolved_settings, app)

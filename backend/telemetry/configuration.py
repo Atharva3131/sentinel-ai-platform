@@ -52,7 +52,7 @@ def configure_telemetry(settings: AppSettings, app: FastAPI) -> TelemetryHandle:
         {
             SERVICE_NAME: settings.app_name,
             SERVICE_VERSION: settings.app_version,
-            "deployment.environment.name": settings.environment,
+            "deployment.environment.name": settings.environment.value,
         }
     )
     provider = TracerProvider(

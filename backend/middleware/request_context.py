@@ -36,12 +36,15 @@ class RequestContextMiddleware:
         workflow_id = _safe_identifier(headers.get("x-workflow-id"))
         execution_id = _safe_identifier(headers.get("x-execution-id"))
         clear_contextvars()
-        bind_contextvars(
-            correlation_id=correlation_id,
-            request_id=request_id,
-            workflow_id=workflow_id,
-            execution_id=execution_id,
-        )
+        context_tokens = {
+            "correlation_id": correlation_id,
+            "request_id": request_id,
+        }
+        if workflow_id is not None:
+            context_tokens["workflow_id"] = workflow_id
+        if execution_id is not None:
+            context_tokens["execution_id"] = execution_id
+        bind_contextvars(**context_tokens)
         started = time.perf_counter()
         status_code = 500
 
@@ -52,15 +55,14 @@ class RequestContextMiddleware:
                 response_headers = MutableHeaders(scope=message)
                 response_headers["X-Correlation-ID"] = correlation_id
                 response_headers["X-Request-ID"] = request_id
+                if workflow_id is not None:
+                    response_headers["X-Workflow-ID"] = workflow_id
+                if execution_id is not None:
+                    response_headers["X-Execution-ID"] = execution_id
             await send(message)
 
         try:
             await self.app(scope, receive, send_with_context)
-        except Exception:
-            _logger.exception(
-                "http_request_failed", method=scope.get("method"), path=scope.get("path")
-            )
-            raise
         finally:
             _logger.info(
                 "http_request_completed",

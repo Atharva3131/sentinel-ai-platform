@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from backend.configuration.settings import LoggingSettings
+from backend.logging.context import add_opentelemetry_context
 
 
 def configure_logging(settings: LoggingSettings) -> None:
@@ -17,6 +18,7 @@ def configure_logging(settings: LoggingSettings) -> None:
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
+        add_opentelemetry_context,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         timestamper,
