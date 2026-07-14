@@ -1,0 +1,113 @@
+name: sentinel-ai-platform
+
+x-application-environment: &application-environment
+  SENTINEL_ENVIRONMENT: development
+  SENTINEL_DEBUG: "false"
+  SENTINEL_LOGGING__JSON_OUTPUT: "true"
+  SENTINEL_OBSERVABILITY__ENABLED: "false"
+  SENTINEL_POSTGRES__URL: postgresql+asyncpg://sentinel:sentinel-local@postgres:5432/sentinel
+  SENTINEL_REDIS__URL: redis://redis:6379/0
+  SENTINEL_NEO4J__ENABLED: "true"
+  SENTINEL_NEO4J__URI: neo4j://neo4j:7687
+  SENTINEL_NEO4J__USERNAME: neo4j
+  SENTINEL_NEO4J__PASSWORD: sentinel-local-password
+  SENTINEL_COSMOS__ENABLED: "false"
+  SENTINEL_BLOB__ENABLED: "false"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment: *application-environment
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: *application-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sentinel
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel-local
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/sentinel-local-password
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  redis-data:
+  neo4j-data:
