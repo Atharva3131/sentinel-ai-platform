@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from azure.cosmos.aio import CosmosClient, DatabaseProxy
-from azure.identity.aio import DefaultAzureCredential
+from azure.identity.aio import ClientSecretCredential, DefaultAzureCredential
 from azure.storage.blob.aio import BlobServiceClient
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from redis.asyncio import Redis
@@ -37,13 +37,15 @@ class ApplicationContainer:
     cosmos: CosmosClient | None = None
     cosmos_database: DatabaseProxy | None = None
     blob: BlobServiceClient | None = None
-    azure_credentials: list[DefaultAzureCredential] = field(default_factory=list)
+    azure_credentials: list[DefaultAzureCredential | ClientSecretCredential] = field(
+        default_factory=list
+    )
 
     @classmethod
     def build(cls, settings: AppSettings) -> ApplicationContainer:
         """Construct lazy clients without performing network I/O."""
         engine = create_async_engine(
-            settings.postgres.url.get_secret_value(),
+            settings.postgres.sqlalchemy_url,
             pool_pre_ping=True,
             pool_size=settings.postgres.pool_size,
             max_overflow=settings.postgres.max_overflow,
@@ -51,7 +53,7 @@ class ApplicationContainer:
             pool_recycle=settings.postgres.pool_recycle_seconds,
         )
         redis_client = Redis.from_url(
-            settings.redis.url.get_secret_value(),
+            settings.redis.redis_url,
             decode_responses=True,
             socket_timeout=settings.redis.socket_timeout_seconds,
             socket_connect_timeout=settings.redis.socket_connect_timeout_seconds,
@@ -67,11 +69,11 @@ class ApplicationContainer:
         cosmos_client: CosmosClient | None = None
         cosmos_database: DatabaseProxy | None = None
         blob_client: BlobServiceClient | None = None
-        credentials: list[DefaultAzureCredential] = []
+        credentials: list[DefaultAzureCredential | ClientSecretCredential] = []
 
         if settings.neo4j.enabled:
             neo4j_driver = AsyncGraphDatabase.driver(
-                settings.neo4j.uri,
+                settings.neo4j.driver_uri,
                 auth=(settings.neo4j.username, settings.neo4j.password.get_secret_value()),
                 connection_timeout=settings.neo4j.connection_timeout_seconds,
                 max_connection_pool_size=settings.neo4j.max_connection_pool_size,
@@ -84,7 +86,7 @@ class ApplicationContainer:
                     settings.cosmos.connection_string.get_secret_value()
                 )
             else:
-                credential = DefaultAzureCredential()
+                credential = _build_azure_credential(settings)
                 credentials.append(credential)
                 cosmos_client = CosmosClient(settings.cosmos.endpoint or "", credential=credential)
             cosmos_database = cosmos_client.get_database_client(settings.cosmos.database_name)
@@ -96,7 +98,7 @@ class ApplicationContainer:
                     settings.blob.connection_string.get_secret_value()
                 )
             else:
-                credential = DefaultAzureCredential()
+                credential = _build_azure_credential(settings)
                 credentials.append(credential)
                 blob_client = BlobServiceClient(
                     account_url=settings.blob.account_url or "", credential=credential
@@ -130,3 +132,23 @@ class ApplicationContainer:
         for credential in self.azure_credentials:
             await credential.close()
         await self.sqlalchemy_engine.dispose()
+
+
+def _build_azure_credential(
+    settings: AppSettings,
+) -> DefaultAzureCredential | ClientSecretCredential:
+    """Create the Azure credential configured for this deployment."""
+    if settings.azure.authentication_mode == "client_secret":
+        return ClientSecretCredential(
+            tenant_id=settings.azure.tenant_id or "",
+            client_id=settings.azure.client_id or "",
+            client_secret=settings.azure.client_secret.get_secret_value()
+            if settings.azure.client_secret is not None
+            else "",
+        )
+
+    return DefaultAzureCredential(
+        managed_identity_client_id=settings.azure.managed_identity_client_id,
+        exclude_environment_credential=settings.azure.exclude_environment_credential,
+        exclude_managed_identity_credential=settings.azure.exclude_managed_identity_credential,
+    )

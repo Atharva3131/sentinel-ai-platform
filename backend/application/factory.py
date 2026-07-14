@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from backend.api.router import build_api_router
 from backend.application.container import ApplicationContainer
-from backend.configuration import AppSettings, load_settings
+from backend.configuration import AppSettings, get_settings
 from backend.logging import configure_logging
 from backend.middleware import RequestContextMiddleware
 from backend.telemetry import TelemetryHandle, configure_telemetry
@@ -18,7 +18,7 @@ from backend.telemetry import TelemetryHandle, configure_telemetry
 
 def create_application(settings: AppSettings | None = None) -> FastAPI:
     """Create a fully composed application without performing network I/O."""
-    resolved_settings = settings or load_settings()
+    resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.logging)
     logger = structlog.get_logger(__name__)
     telemetry: TelemetryHandle | None = None

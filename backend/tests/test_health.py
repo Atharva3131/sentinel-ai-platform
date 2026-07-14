@@ -4,16 +4,16 @@ import httpx
 import pytest
 
 from backend.application.factory import create_application
-from backend.configuration.settings import AppSettings, ObservabilitySettings
+from backend.configuration.settings import AppSettings, OpenTelemetrySettings
 
 
 @pytest.mark.asyncio
 async def test_liveness_returns_service_metadata() -> None:
     """Liveness must not require an external dependency connection."""
     settings = AppSettings(
-        environment="test",
+        environment="testing",
         neo4j={"enabled": False},
-        observability=ObservabilitySettings(enabled=False),
+        opentelemetry=OpenTelemetrySettings(enabled=False),
     )
     app = create_application(settings)
     async with app.router.lifespan_context(app):

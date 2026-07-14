@@ -14,6 +14,7 @@ from opentelemetry.sdk.resources import SERVICE_NAME, SERVICE_VERSION, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from backend.configuration.settings import AppSettings
@@ -44,7 +45,7 @@ class TelemetryHandle:
 
 def configure_telemetry(settings: AppSettings, app: FastAPI) -> TelemetryHandle:
     """Configure tracing and instrument the FastAPI application."""
-    if not settings.observability.enabled:
+    if not settings.opentelemetry.enabled:
         return TelemetryHandle()
 
     resource = Resource.create(
@@ -56,17 +57,35 @@ def configure_telemetry(settings: AppSettings, app: FastAPI) -> TelemetryHandle:
     )
     provider = TracerProvider(
         resource=resource,
-        sampler=ParentBased(TraceIdRatioBased(settings.observability.trace_sample_ratio)),
+        sampler=ParentBased(TraceIdRatioBased(settings.opentelemetry.trace_sample_ratio)),
     )
-    if settings.observability.otlp_http_endpoint:
-        exporter = OTLPSpanExporter(endpoint=settings.observability.otlp_http_endpoint)
+    if settings.opentelemetry.otlp_http_endpoint:
+        exporter = OTLPSpanExporter(
+            endpoint=settings.opentelemetry.otlp_http_endpoint,
+            headers=_parse_otlp_headers(settings.opentelemetry.otlp_headers),
+            timeout=settings.opentelemetry.export_timeout_seconds,
+        )
         provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
 
-    excluded_urls = "/health.*" if settings.observability.exclude_health_endpoints else None
+    excluded_urls = "/health.*" if settings.opentelemetry.exclude_health_endpoints else None
     FastAPIInstrumentor.instrument_app(
         app,
         tracer_provider=provider,
         excluded_urls=excluded_urls,
     )
     return TelemetryHandle(provider=provider)
+
+
+def _parse_otlp_headers(headers: SecretStr | None) -> dict[str, str] | None:
+    """Convert `key=value,key=value` header strings into exporter headers."""
+    if not headers:
+        return None
+
+    parsed_headers: dict[str, str] = {}
+    for item in headers.get_secret_value().split(","):
+        key, separator, value = item.partition("=")
+        if not separator:
+            continue
+        parsed_headers[key.strip()] = value.strip()
+    return parsed_headers or None
