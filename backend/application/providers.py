@@ -40,6 +40,7 @@ from backend.queues.redis import (
     RedisRetryQueue,
     RedisStreamClient,
 )
+from backend.runtime import RuntimeFactory, RuntimeRegistry
 from backend.telemetry import TelemetryHandle
 
 
@@ -138,6 +139,14 @@ class ApplicationProvider(Provider):
     @provide(scope=Scope.APP)
     def redis_dead_letter_queue(self, container: ApplicationContainer) -> RedisDeadLetterQueue:
         return container.redis_dead_letter_queue
+
+    @provide(scope=Scope.APP)
+    def runtime_registry(self, container: ApplicationContainer) -> RuntimeRegistry:
+        return container.runtime_registry
+
+    @provide(scope=Scope.APP)
+    def runtime_factory(self, container: ApplicationContainer) -> RuntimeFactory:
+        return container.runtime_factory
 
     @provide(scope=Scope.APP)
     def cosmos_connection(self, container: ApplicationContainer) -> CosmosConnection:

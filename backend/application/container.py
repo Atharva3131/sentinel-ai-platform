@@ -48,6 +48,7 @@ from backend.queues.redis import (
     RedisRetryQueue,
     RedisStreamClient,
 )
+from backend.runtime import RuntimeFactory, RuntimeRegistry
 from backend.telemetry import TelemetryHandle
 
 
@@ -74,6 +75,8 @@ class ApplicationContainer:
     neo4j: AsyncDriver | None = None
     neo4j_executor: Neo4jCypherExecutor | None = None
     neo4j_retry_policy: RetryPolicy | None = None
+    runtime_registry: RuntimeRegistry = field(default_factory=RuntimeRegistry)
+    runtime_factory: RuntimeFactory = field(init=False)
     cosmos: CosmosClient | None = None
     cosmos_database: DatabaseProxy | None = None
     cosmos_container_factory: CosmosContainerFactory | None = None
@@ -111,6 +114,7 @@ class ApplicationContainer:
         redis_lock_manager = RedisLockManager(redis_connection)
         redis_retry_queue = RedisRetryQueue(redis_streams)
         redis_dead_letter_queue = RedisDeadLetterQueue(redis_streams)
+        runtime_registry: RuntimeRegistry = RuntimeRegistry()
 
         checks: list[HealthCheck] = [
             PostgresHealthCheck(session_manager, retry_policy),
@@ -193,6 +197,7 @@ class ApplicationContainer:
             redis_lock_manager=redis_lock_manager,
             redis_retry_queue=redis_retry_queue,
             redis_dead_letter_queue=redis_dead_letter_queue,
+            runtime_registry=runtime_registry,
             health_service=health_service,
             cosmos_connection=cosmos_connection,
             neo4j_connection=neo4j_connection,
@@ -226,6 +231,10 @@ class ApplicationContainer:
         for credential in self.azure_credentials:
             await credential.close()
         await self.sqlalchemy_engine.dispose()
+
+    def __post_init__(self) -> None:
+        """Derive the runtime factory from the injected registry."""
+        self.runtime_factory = RuntimeFactory(self.runtime_registry)
 
 
 def _build_azure_credential(

@@ -10,6 +10,7 @@ from backend.application.factory import create_application
 from backend.application.health import HealthService, ReadinessReport
 from backend.configuration.settings import AppSettings, OpenTelemetrySettings
 from backend.interfaces.health import HealthCheckResult, HealthStatus
+from backend.runtime import RuntimeFactory
 
 
 class StubHealthService(HealthService):
@@ -52,6 +53,8 @@ async def test_override_provider_replaces_readiness_service() -> None:
     )
     app = create_application(settings, override_providers=(OverrideProvider(),))
     async with app.router.lifespan_context(app):
+        runtime_factory = await app.state.dishka_container.get(RuntimeFactory)
+        assert isinstance(runtime_factory, RuntimeFactory)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.get("/health/ready")
