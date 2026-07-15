@@ -42,6 +42,7 @@ from backend.queues.redis import (
     RedisStreamClient,
 )
 from backend.runtime import RuntimeFactory, RuntimeRegistry
+from backend.runtime.middleware import RuntimeMiddlewarePipeline
 from backend.telemetry import TelemetryHandle
 
 
@@ -147,6 +148,13 @@ class ApplicationProvider(Provider):
         container: ApplicationContainer,
     ) -> RedisWorkflowEventPublisher:
         return container.workflow_event_publisher
+
+    @provide(scope=Scope.APP)
+    def runtime_middleware_pipeline(
+        self,
+        container: ApplicationContainer,
+    ) -> RuntimeMiddlewarePipeline:
+        return container.runtime_middleware_pipeline
 
     @provide(scope=Scope.APP)
     def runtime_registry(self, container: ApplicationContainer) -> RuntimeRegistry:

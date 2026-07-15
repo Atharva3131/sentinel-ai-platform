@@ -8,6 +8,7 @@ from backend.runtime.contracts import (
 )
 from backend.runtime.exceptions import RuntimeException
 from backend.runtime.factory import RuntimeFactory
+from backend.runtime.middleware import RuntimeExecutionRequest, RuntimeMiddlewarePipeline
 from backend.runtime.registry import RuntimeRegistry
 from backend.runtime.results import RuntimeResult
 
@@ -16,7 +17,9 @@ __all__ = [
     "RuntimeContext",
     "RuntimeEventEmitter",
     "RuntimeException",
+    "RuntimeExecutionRequest",
     "RuntimeFactory",
+    "RuntimeMiddlewarePipeline",
     "RuntimeRegistry",
     "RuntimeResult",
     "WorkflowExecution",

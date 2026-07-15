@@ -8,6 +8,10 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from backend.runtime import RuntimeException, RuntimeFactory, RuntimeResult
+from backend.runtime.middleware import (
+    RuntimeExecutionRequest,
+    RuntimeMiddlewarePipeline,
+)
 from backend.workflows.context import WorkflowContext
 from backend.workflows.registry import WorkflowRegistry
 from backend.workflows.state import WorkflowState
@@ -20,6 +24,7 @@ class WorkflowExecutor:
 
     workflow_registry: WorkflowRegistry
     runtime_factory: RuntimeFactory
+    middleware_pipeline: RuntimeMiddlewarePipeline | None = None
     validator: WorkflowValidator = field(default_factory=WorkflowValidator)
 
     async def execute(
@@ -331,6 +336,9 @@ class WorkflowExecutor:
         runtime_context: Any,
     ) -> RuntimeResult:
         try:
+            request = RuntimeExecutionRequest(runtime=runtime, context=runtime_context)
+            if self.middleware_pipeline is not None:
+                return await self.middleware_pipeline.execute(runtime, request)
             return cast(RuntimeResult, await runtime.execute(runtime_context))
         except RuntimeException as exc:
             return RuntimeResult(

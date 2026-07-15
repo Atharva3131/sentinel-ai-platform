@@ -50,6 +50,7 @@ from backend.queues.redis import (
     RedisStreamClient,
 )
 from backend.runtime import RuntimeFactory, RuntimeRegistry
+from backend.runtime.middleware import RuntimeMiddlewarePipeline
 from backend.telemetry import TelemetryHandle
 
 
@@ -71,6 +72,7 @@ class ApplicationContainer:
     redis_retry_queue: RedisRetryQueue
     redis_dead_letter_queue: RedisDeadLetterQueue
     workflow_event_publisher: RedisWorkflowEventPublisher
+    runtime_middleware_pipeline: RuntimeMiddlewarePipeline
     health_service: HealthService
     cosmos_connection: CosmosConnection | None = None
     neo4j_connection: Neo4jConnection | None = None
@@ -117,6 +119,7 @@ class ApplicationContainer:
         redis_retry_queue = RedisRetryQueue(redis_streams)
         redis_dead_letter_queue = RedisDeadLetterQueue(redis_streams)
         workflow_event_publisher = RedisWorkflowEventPublisher(redis_streams)
+        runtime_middleware_pipeline = RuntimeMiddlewarePipeline()
         runtime_registry: RuntimeRegistry = RuntimeRegistry()
 
         checks: list[HealthCheck] = [
@@ -201,6 +204,7 @@ class ApplicationContainer:
             redis_retry_queue=redis_retry_queue,
             redis_dead_letter_queue=redis_dead_letter_queue,
             workflow_event_publisher=workflow_event_publisher,
+            runtime_middleware_pipeline=runtime_middleware_pipeline,
             runtime_registry=runtime_registry,
             health_service=health_service,
             cosmos_connection=cosmos_connection,
