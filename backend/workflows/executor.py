@@ -106,8 +106,21 @@ class WorkflowExecutor:
                 timeout_seconds=policy.effective_timeout_seconds(context.timeout_seconds),
             )
             runtime_result = await self._execute_runtime(runtime, runtime_context)
+            previous_checkpoint_id = running_state.checkpoint_id
             updated_state = running_state.with_result(runtime_result)
             updated_state = self._maybe_update_checkpoint(updated_state, runtime_result)
+            if updated_state.checkpoint_id != previous_checkpoint_id:
+                await self._emit(
+                    context,
+                    "workflow.checkpointed",
+                    {
+                        "workflow_id": definition.workflow_id,
+                        "workflow_version": definition.version,
+                        "execution_id": context.execution_id,
+                        "attempt": attempt,
+                        "checkpoint_id": updated_state.checkpoint_id,
+                    },
+                )
 
             if runtime_result.status == "completed":
                 self.validator.validate_transition(
@@ -166,7 +179,7 @@ class WorkflowExecutor:
                     delay = policy.next_retry_delay_seconds(attempt)
                 await self._emit(
                     context,
-                    "workflow.retry_scheduled",
+                    "workflow.retried",
                     {
                         "workflow_id": definition.workflow_id,
                         "workflow_version": definition.version,
@@ -267,6 +280,17 @@ class WorkflowExecutor:
             },
         )
         result = await self.execute(context, recovered_state)
+        await self._emit(
+            context,
+            "workflow.recovered",
+            {
+                "workflow_id": result.workflow_id,
+                "workflow_version": result.workflow_version,
+                "execution_id": result.execution_id,
+                "checkpoint_id": checkpoint_id,
+                "status": result.status,
+            },
+        )
         await self._emit(
             context,
             "workflow.recovery.completed",

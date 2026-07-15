@@ -21,6 +21,7 @@ from backend.db.engine import create_postgres_engine
 from backend.db.health import PostgresHealthCheck
 from backend.db.retry import RetryPolicy
 from backend.db.session import DatabaseSessionManager, create_session_factory
+from backend.events.workflow_streams import RedisWorkflowEventPublisher
 from backend.infrastructure.cosmos import (
     CosmosConnection,
     CosmosContainerFactory,
@@ -69,6 +70,7 @@ class ApplicationContainer:
     redis_lock_manager: RedisLockManager
     redis_retry_queue: RedisRetryQueue
     redis_dead_letter_queue: RedisDeadLetterQueue
+    workflow_event_publisher: RedisWorkflowEventPublisher
     health_service: HealthService
     cosmos_connection: CosmosConnection | None = None
     neo4j_connection: Neo4jConnection | None = None
@@ -114,6 +116,7 @@ class ApplicationContainer:
         redis_lock_manager = RedisLockManager(redis_connection)
         redis_retry_queue = RedisRetryQueue(redis_streams)
         redis_dead_letter_queue = RedisDeadLetterQueue(redis_streams)
+        workflow_event_publisher = RedisWorkflowEventPublisher(redis_streams)
         runtime_registry: RuntimeRegistry = RuntimeRegistry()
 
         checks: list[HealthCheck] = [
@@ -197,6 +200,7 @@ class ApplicationContainer:
             redis_lock_manager=redis_lock_manager,
             redis_retry_queue=redis_retry_queue,
             redis_dead_letter_queue=redis_dead_letter_queue,
+            workflow_event_publisher=workflow_event_publisher,
             runtime_registry=runtime_registry,
             health_service=health_service,
             cosmos_connection=cosmos_connection,

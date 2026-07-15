@@ -26,6 +26,7 @@ from backend.configuration.settings import (
 from backend.db.health import PostgresHealthCheck
 from backend.db.retry import RetryPolicy
 from backend.db.session import DatabaseSessionManager
+from backend.events.workflow_streams import RedisWorkflowEventPublisher
 from backend.infrastructure.cosmos import (
     CosmosConnection,
     CosmosContainerFactory,
@@ -139,6 +140,13 @@ class ApplicationProvider(Provider):
     @provide(scope=Scope.APP)
     def redis_dead_letter_queue(self, container: ApplicationContainer) -> RedisDeadLetterQueue:
         return container.redis_dead_letter_queue
+
+    @provide(scope=Scope.APP)
+    def workflow_event_publisher(
+        self,
+        container: ApplicationContainer,
+    ) -> RedisWorkflowEventPublisher:
+        return container.workflow_event_publisher
 
     @provide(scope=Scope.APP)
     def runtime_registry(self, container: ApplicationContainer) -> RuntimeRegistry:

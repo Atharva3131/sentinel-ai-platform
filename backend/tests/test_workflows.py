@@ -223,7 +223,8 @@ async def test_executor_retries_retryable_failures_and_uses_checkpoint() -> None
     assert state.checkpoint_id == "ckpt-2"
     assert len(runtime.contexts) == 2
     assert runtime.contexts[1].execution.checkpoint_id == "ckpt-1"
-    assert any(event[0] == "workflow.retry_scheduled" for event in emitter.events)
+    assert any(event[0] == "workflow.retried" for event in emitter.events)
+    assert any(event[0] == "workflow.checkpointed" for event in emitter.events)
 
 
 @pytest.mark.asyncio
@@ -274,6 +275,7 @@ async def test_executor_recovers_from_checkpointed_state() -> None:
     assert recovered.recovery_count == 1
     assert runtime.contexts[0].execution.checkpoint_id == "ckpt-1"
     assert any(event[0] == "workflow.recovery.started" for event in emitter.events)
+    assert any(event[0] == "workflow.recovered" for event in emitter.events)
 
 
 def test_validator_rejects_invalid_definition() -> None:
