@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from backend.retrieval.benchmark_runner import BenchmarkRunner, RetrievalFn
 from backend.retrieval.chunking import ChunkingEngine
 from backend.retrieval.content_extractor import ContentExtractor
 from backend.retrieval.context import RetrievalContext
+from backend.retrieval.context_scorer import ContextQualityScorer
 from backend.retrieval.embedding_indexer import EmbeddingIndexer
 from backend.retrieval.exceptions import (
     ChunkingError,
@@ -20,6 +22,7 @@ from backend.retrieval.extractor import MetadataExtractor
 from backend.retrieval.factory import EmbeddingFactory, EmbeddingProviderFactory
 from backend.retrieval.graph import GraphRetriever
 from backend.retrieval.graph_builder import KnowledgeGraphBuilder
+from backend.retrieval.groundedness_scorer import GroundednessScorer
 from backend.retrieval.hybrid import HybridRetriever
 from backend.retrieval.ingestion_exceptions import (
     ContentExtractionError,
@@ -71,9 +74,23 @@ from backend.retrieval.providers import (
     RetrievalProvider,
 )
 from backend.retrieval.relationship_builder import RelationshipBuilder
+from backend.retrieval.retrieval_eval_models import (
+    BenchmarkCase,
+    BenchmarkResult,
+    JudgeProvider,
+    RetrievalEvaluationReport,
+    RetrievalMetrics,
+)
+from backend.retrieval.retrieval_evaluator import (
+    RetrievalEvaluator,
+    register_retrieval_strategies,
+)
 from backend.retrieval.versioning import DocumentVersionManager
 
 __all__ = [
+    "BenchmarkCase",
+    "BenchmarkResult",
+    "BenchmarkRunner",
     "CacheInvalidator",
     "Chunk",
     "ChunkRecord",
@@ -84,6 +101,7 @@ __all__ = [
     "ContentExtractor",
     "ContextOptimizationError",
     "ContextOptimizer",
+    "ContextQualityScorer",
     "Document",
     "DocumentFormat",
     "DocumentIngestionPipeline",
@@ -106,12 +124,14 @@ __all__ = [
     "GraphBuildError",
     "GraphRetriever",
     "GraphTraversalError",
+    "GroundednessScorer",
     "HybridRetriever",
     "IngestionError",
     "IngestionPipelineError",
     "IngestionRequest",
     "IngestionResult",
     "IngestionStatus",
+    "JudgeProvider",
     "KnowledgeEventPublisher",
     "KnowledgeGraphBuilder",
     "KnowledgeIndexer",
@@ -125,7 +145,11 @@ __all__ = [
     "RetrievalCache",
     "RetrievalContext",
     "RetrievalError",
+    "RetrievalEvaluationReport",
+    "RetrievalEvaluator",
+    "RetrievalFn",
     "RetrievalMetadata",
+    "RetrievalMetrics",
     "RetrievalPipeline",
     "RetrievalProvider",
     "RetrievalProviderError",
@@ -133,4 +157,5 @@ __all__ = [
     "RetrievalStrategy",
     "VectorIndexPort",
     "VersioningError",
+    "register_retrieval_strategies",
 ]
