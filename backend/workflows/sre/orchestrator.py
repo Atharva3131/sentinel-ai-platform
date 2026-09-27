@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from backend.agents.context import AgentContext
 from backend.runtime.context import RuntimeContext
+from backend.workflows.sre.analyzer import SREAnalyzer
 from backend.workflows.sre.auditor import WorkflowAuditor
 from backend.workflows.sre.confidence import ConfidenceEvaluator
 from backend.workflows.sre.context_builder import IncidentContextBuilder
@@ -31,15 +31,14 @@ from backend.workflows.sre.events import (
     SRE_WORKFLOW_FAILED,
     SRE_WORKFLOW_STARTED,
 )
-from backend.workflows.sre.exceptions import SREPhaseError, SREWorkflowError
+from backend.workflows.sre.exceptions import SREPhaseError
 from backend.workflows.sre.models import (
     ApprovalRequest,
     IncidentContext,
     SREWorkflowResult,
 )
 from backend.workflows.sre.plan_builder import SREPlanBuilder
-from backend.workflows.sre.analyzer import SREAnalyzer
-from backend.workflows.sre.ports import ApprovalGateway
+from backend.workflows.sre.ports import ApprovalGateway, AuditRepository
 from backend.workflows.sre.recovery import RecoveryCoordinator
 
 
@@ -77,6 +76,9 @@ class SREWorkflowOrchestrator:
 
     The orchestrator is stateless between ``run()`` calls — it is safe to share
     across concurrent invocations.
+
+    ``audit_repository`` is optional: when None a no-op repository is used so
+    audit entries are buffered in-memory but not persisted externally.
     """
 
     context_builder: IncidentContextBuilder
@@ -85,6 +87,7 @@ class SREWorkflowOrchestrator:
     confidence_evaluator: ConfidenceEvaluator
     recovery_coordinator: RecoveryCoordinator
     approval_gateway: ApprovalGateway | None = None
+    audit_repository: AuditRepository | None = None
 
     async def run(
         self,
@@ -98,9 +101,12 @@ class SREWorkflowOrchestrator:
         errors (e.g. programmer mistakes) will propagate as raw exceptions.
         """
         started_ms = time.monotonic() * 1000
-        auditor = WorkflowAuditor(
-            repository=self._null_audit_repository(),
+        repo = (
+            self.audit_repository
+            if self.audit_repository is not None
+            else _NullAuditRepository()
         )
+        auditor = WorkflowAuditor(repository=repo)
         wf_id = runtime_context.workflow.workflow_id
         exec_id = runtime_context.execution.execution_id
         corr_id = runtime_context.correlation_id
@@ -109,6 +115,9 @@ class SREWorkflowOrchestrator:
             "incident_id": incident.incident_id,
             "severity": str(incident.severity),
             "affected_services": list(incident.affected_services),
+        })
+        await self._audit(auditor, incident.incident_id, "workflow", "started", wf_id, exec_id, {
+            "severity": str(incident.severity),
         })
 
         def _duration() -> float:
@@ -130,11 +139,17 @@ class SREWorkflowOrchestrator:
         # ── Phase 1: Context retrieval ────────────────────────────────────
         if runtime_context.is_cancelled():
             await self._emit(runtime_context, SRE_WORKFLOW_CANCELLED, {"phase": "before_retrieval"})
+            await self._audit(
+                auditor, incident.incident_id, "workflow", "cancelled",
+                wf_id, exec_id, {"phase": "before_retrieval"},
+            )
             return _base_result("cancelled")
 
         await self._emit(runtime_context, SRE_CONTEXT_RETRIEVAL_STARTED, {
             "incident_id": incident.incident_id,
         })
+        await self._audit(auditor, incident.incident_id, "context_retrieval", "started",
+                          wf_id, exec_id)
         try:
             retrieved_results, retrieval_metadata = await self.context_builder.build(
                 incident,
@@ -146,6 +161,8 @@ class SREWorkflowOrchestrator:
             await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                 "phase": exc.phase, "error": str(exc),
             })
+            await self._audit(auditor, incident.incident_id, exc.phase, "failed",
+                              wf_id, exec_id, {"error": str(exc)})
             return _base_result("failed", metadata={"error": str(exc), "phase": exc.phase})
 
         await self._emit(runtime_context, SRE_CONTEXT_RETRIEVED, {
@@ -153,15 +170,23 @@ class SREWorkflowOrchestrator:
             "cached": retrieval_metadata.cached,
             "latency_ms": retrieval_metadata.latency_ms,
         })
+        await self._audit(auditor, incident.incident_id, "context_retrieval", "completed",
+                          wf_id, exec_id, {
+                              "chunk_count": len(retrieved_results),
+                              "cached": retrieval_metadata.cached,
+                          })
 
         # ── Phase 2: Plan build ───────────────────────────────────────────
         if runtime_context.is_cancelled():
             await self._emit(runtime_context, SRE_WORKFLOW_CANCELLED, {"phase": "before_plan"})
+            await self._audit(auditor, incident.incident_id, "workflow", "cancelled",
+                              wf_id, exec_id, {"phase": "before_plan"})
             return _base_result("cancelled")
 
         await self._emit(runtime_context, SRE_PLAN_BUILD_STARTED, {
             "incident_id": incident.incident_id,
         })
+        await self._audit(auditor, incident.incident_id, "plan_build", "started", wf_id, exec_id)
         try:
             plan = await self.plan_builder.build(
                 incident, retrieved_results, context=agent_context
@@ -170,6 +195,8 @@ class SREWorkflowOrchestrator:
             await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                 "phase": exc.phase, "error": str(exc),
             })
+            await self._audit(auditor, incident.incident_id, exc.phase, "failed",
+                              wf_id, exec_id, {"error": str(exc)})
             return _base_result("failed", metadata={"error": str(exc), "phase": exc.phase})
 
         await self._emit(runtime_context, SRE_PLAN_BUILT, {
@@ -177,15 +204,23 @@ class SREWorkflowOrchestrator:
             "step_count": len(plan.steps),
             "stage_count": len(plan.stages),
         })
+        await self._audit(auditor, incident.incident_id, "plan_build", "completed",
+                          wf_id, exec_id, {
+                              "plan_id": plan.plan_id,
+                              "step_count": len(plan.steps),
+                          })
 
         # ── Phase 3: Analysis ─────────────────────────────────────────────
         if runtime_context.is_cancelled():
             await self._emit(runtime_context, SRE_WORKFLOW_CANCELLED, {"phase": "before_analysis"})
+            await self._audit(auditor, incident.incident_id, "workflow", "cancelled",
+                              wf_id, exec_id, {"phase": "before_analysis"})
             return _base_result("cancelled", plan=plan)
 
         await self._emit(runtime_context, SRE_ANALYSIS_STARTED, {
             "incident_id": incident.incident_id,
         })
+        await self._audit(auditor, incident.incident_id, "analysis", "started", wf_id, exec_id)
         try:
             analysis = await self.analyzer.analyze(
                 incident, plan, retrieved_results, context=agent_context
@@ -194,22 +229,38 @@ class SREWorkflowOrchestrator:
             await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                 "phase": exc.phase, "error": str(exc),
             })
-            return _base_result("failed", plan=plan, metadata={"error": str(exc), "phase": exc.phase})
+            await self._audit(auditor, incident.incident_id, exc.phase, "failed",
+                              wf_id, exec_id, {"error": str(exc)})
+            return _base_result(
+                "failed", plan=plan,
+                metadata={"error": str(exc), "phase": exc.phase},
+            )
 
         await self._emit(runtime_context, SRE_ANALYSIS_COMPLETED, {
             "finding_count": len(analysis.findings),
             "root_cause": analysis.root_cause_hypothesis,
             "health_status": analysis.health_status,
         })
+        await self._audit(auditor, incident.incident_id, "analysis", "completed",
+                          wf_id, exec_id, {
+                              "finding_count": len(analysis.findings),
+                              "root_cause": analysis.root_cause_hypothesis,
+                          })
 
         # ── Phase 4: Confidence evaluation ────────────────────────────────
         if runtime_context.is_cancelled():
-            await self._emit(runtime_context, SRE_WORKFLOW_CANCELLED, {"phase": "before_confidence"})
+            await self._emit(
+                runtime_context, SRE_WORKFLOW_CANCELLED,
+                {"phase": "before_confidence"},
+            )
+            await self._audit(auditor, incident.incident_id, "workflow", "cancelled",
+                              wf_id, exec_id, {"phase": "before_confidence"})
             return _base_result("cancelled", plan=plan, analysis=analysis)
 
         await self._emit(runtime_context, SRE_CONFIDENCE_EVALUATION_STARTED, {
             "incident_id": incident.incident_id,
         })
+        await self._audit(auditor, incident.incident_id, "confidence", "started", wf_id, exec_id)
         try:
             confidence = await self.confidence_evaluator.evaluate(
                 incident,
@@ -222,6 +273,8 @@ class SREWorkflowOrchestrator:
             await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                 "phase": exc.phase, "error": str(exc),
             })
+            await self._audit(auditor, incident.incident_id, exc.phase, "failed",
+                              wf_id, exec_id, {"error": str(exc)})
             return _base_result(
                 "failed", plan=plan, analysis=analysis,
                 metadata={"error": str(exc), "phase": exc.phase},
@@ -232,6 +285,12 @@ class SREWorkflowOrchestrator:
             "level": str(confidence.level),
             "requires_approval": confidence.requires_approval,
         })
+        await self._audit(auditor, incident.incident_id, "confidence", "completed",
+                          wf_id, exec_id, {
+                              "score": confidence.score,
+                              "level": str(confidence.level),
+                              "requires_approval": confidence.requires_approval,
+                          })
 
         # ── Phase 5: Approval gate ────────────────────────────────────────
         approval = None
@@ -242,6 +301,8 @@ class SREWorkflowOrchestrator:
                     "reason": "approval_required_but_no_gateway",
                     "confidence_score": confidence.score,
                 })
+                await self._audit(auditor, incident.incident_id, "approval", "escalated",
+                                  wf_id, exec_id, {"reason": "no_gateway_configured"})
                 return _base_result(
                     "escalated",
                     plan=plan,
@@ -263,12 +324,19 @@ class SREWorkflowOrchestrator:
                 "timeout_seconds": request.timeout_seconds,
                 "confidence_score": confidence.score,
             })
+            await self._audit(auditor, incident.incident_id, "approval", "requested",
+                              wf_id, exec_id, {
+                                  "request_id": request.request_id,
+                                  "confidence_score": confidence.score,
+                              })
             try:
                 approval = await self.approval_gateway.request_approval(request)
             except Exception as exc:
                 await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                     "phase": "approval", "error": str(exc),
                 })
+                await self._audit(auditor, incident.incident_id, "approval", "failed",
+                                  wf_id, exec_id, {"error": str(exc)})
                 return _base_result(
                     "failed",
                     plan=plan,
@@ -282,10 +350,18 @@ class SREWorkflowOrchestrator:
                 "decision": str(approval.decision),
                 "approver_id": approval.approver_id,
             })
+            await self._audit(auditor, incident.incident_id, "approval", "received",
+                              wf_id, exec_id, {
+                                  "request_id": approval.request_id,
+                                  "decision": str(approval.decision),
+                                  "approver_id": approval.approver_id,
+                              })
 
         # ── Phase 6: Recovery ─────────────────────────────────────────────
         if runtime_context.is_cancelled():
             await self._emit(runtime_context, SRE_WORKFLOW_CANCELLED, {"phase": "before_recovery"})
+            await self._audit(auditor, incident.incident_id, "workflow", "cancelled",
+                              wf_id, exec_id, {"phase": "before_recovery"})
             return _base_result(
                 "cancelled",
                 plan=plan, analysis=analysis, confidence=confidence, approval=approval,
@@ -294,6 +370,7 @@ class SREWorkflowOrchestrator:
         await self._emit(runtime_context, SRE_RECOVERY_STARTED, {
             "incident_id": incident.incident_id,
         })
+        await self._audit(auditor, incident.incident_id, "recovery", "started", wf_id, exec_id)
         try:
             recovery = await self.recovery_coordinator.run(
                 incident, plan, analysis, approval, correlation_id=corr_id
@@ -302,6 +379,8 @@ class SREWorkflowOrchestrator:
             await self._emit(runtime_context, SRE_WORKFLOW_FAILED, {
                 "phase": exc.phase, "error": str(exc),
             })
+            await self._audit(auditor, incident.incident_id, exc.phase, "failed",
+                              wf_id, exec_id, {"error": str(exc)})
             return _base_result(
                 "failed",
                 plan=plan, analysis=analysis, confidence=confidence, approval=approval,
@@ -313,6 +392,12 @@ class SREWorkflowOrchestrator:
             "actions_succeeded": recovery.actions_succeeded,
             "recovered": recovery.recovered,
         })
+        await self._audit(auditor, incident.incident_id, "recovery", "completed",
+                          wf_id, exec_id, {
+                              "actions_attempted": recovery.actions_attempted,
+                              "actions_succeeded": recovery.actions_succeeded,
+                              "recovered": recovery.recovered,
+                          })
 
         # ── Phase 7: Finalise ─────────────────────────────────────────────
         final_status = "completed" if recovery.recovered else "mitigated"
@@ -321,6 +406,11 @@ class SREWorkflowOrchestrator:
             "status": final_status,
             "duration_ms": _duration(),
         })
+        await self._audit(auditor, incident.incident_id, "workflow", "completed",
+                          wf_id, exec_id, {
+                              "final_status": final_status,
+                              "duration_ms": _duration(),
+                          })
 
         return SREWorkflowResult(
             incident_id=incident.incident_id,
@@ -343,25 +433,46 @@ class SREWorkflowOrchestrator:
         event_name: str,
         payload: dict[str, Any],
     ) -> None:
+        """Emit a structured event; swallows errors so emission never aborts the workflow."""
         if context.event_emitter is None:
             return
         try:
             await context.event_emitter.emit(event_name, payload, context)
         except Exception:
-            pass  # event emission must never abort the workflow
+            pass
 
     @staticmethod
-    def _null_audit_repository() -> Any:
-        """Return a no-op audit repository used when no external repo is wired."""
+    async def _audit(
+        auditor: WorkflowAuditor,
+        incident_id: str,
+        phase: str,
+        event: str,
+        workflow_id: str | None,
+        execution_id: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an audit entry; swallows errors so audit never aborts the workflow."""
+        try:
+            await auditor.record(
+                incident_id=incident_id,
+                phase=phase,
+                event=event,
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                details=details,
+            )
+        except Exception:
+            pass
 
-        class _NullRepo:
-            async def persist(self, entry: Any) -> None:
-                pass
 
-            async def list_entries(self, incident_id: str) -> list[Any]:
-                return []
+class _NullAuditRepository:
+    """No-op audit repository used when no external repo is wired."""
 
-        return _NullRepo()
+    async def persist(self, entry: Any) -> None:
+        pass
+
+    async def list_entries(self, incident_id: str) -> list[Any]:
+        return []
 
 
 def _utcnow() -> Any:

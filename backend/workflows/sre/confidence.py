@@ -100,9 +100,9 @@ class ConfidenceEvaluator:
         try:
             evaluator = RetrievalEvaluator(
                 engine=self.engine,
-                default_strategies=["retrieval.context_quality"],
+                default_strategies=("retrieval.context_quality",),
             )
-            retrieval_metrics, report = await evaluator.evaluate(
+            _retrieval_metrics, report = await evaluator.evaluate(
                 incident.title,
                 retrieved_results,
                 retrieval_metadata,

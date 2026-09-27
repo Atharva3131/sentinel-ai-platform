@@ -69,7 +69,7 @@ class SREWorkflowRuntime:
             result = await self.orchestrator.run(incident, context)
         except SREWorkflowError as exc:
             return _error_result(context, str(exc), retryable=False)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _error_result(context, f"Unexpected error: {exc}", retryable=True)
 
         terminal_status = "completed" if result.status in ("completed", "mitigated") else "failed"

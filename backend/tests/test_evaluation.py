@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,8 @@ from backend.evaluation.models import (
     EvaluationVerdict,
 )
 from backend.evaluation.pipeline import EvaluationPipeline
-from backend.evaluation.registry import EvaluationRegistry
+from backend.evaluation.registry import EvaluationRegistry, EvaluationStrategyProvider
+from backend.evaluation.strategy import EvaluationStrategy
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -211,7 +213,7 @@ class BlockingStrategy:
 def _ctx(
     *,
     subject: EvaluationSubject = EvaluationSubject.WORKFLOW,
-    evidence: dict | None = None,
+    evidence: dict[str, Any] | None = None,
     cancellation_token: FakeCancellationToken | None = None,
 ) -> EvaluationContext:
     return EvaluationContext(
@@ -227,10 +229,17 @@ def _ctx(
 def _registry(*strategies: tuple[str, object]) -> EvaluationRegistry:
     reg = EvaluationRegistry()
     for name, strategy in strategies:
+        captured: EvaluationStrategy = strategy  # type: ignore[assignment]
+
+        def _make_provider(s: EvaluationStrategy) -> EvaluationStrategyProvider:
+            def _provider(_deps: dict[str, Any] | None) -> EvaluationStrategy:
+                return s
+            return _provider
+
         reg.register(
             name=name,
             version="1.0.0",
-            provider=lambda _deps, s=strategy: s,  # type: ignore[arg-type]
+            provider=_make_provider(captured),
             default=True,
         )
     return reg

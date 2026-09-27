@@ -11,11 +11,11 @@ from backend.workflows.sre.exceptions import SREPhaseError
 from backend.workflows.sre.models import IncidentContext
 from backend.workflows.sre.ports import KnowledgeRetrieverPort
 
-_GRAPH_NODE_TYPES: frozenset[str] = frozenset(
-    {"Service", "Symptom", "Runbook", "Incident", "Component"}
+_GRAPH_NODE_TYPES: tuple[str, ...] = (
+    "Service", "Symptom", "Runbook", "Incident", "Component"
 )
-_GRAPH_RELATIONSHIP_TYPES: frozenset[str] = frozenset(
-    {"DEPENDS_ON", "HAS_RUNBOOK", "AFFECTED", "OBSERVED"}
+_GRAPH_RELATIONSHIP_TYPES: tuple[str, ...] = (
+    "DEPENDS_ON", "HAS_RUNBOOK", "AFFECTED", "OBSERVED"
 )
 
 

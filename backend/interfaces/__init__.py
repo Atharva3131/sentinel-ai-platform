@@ -6,6 +6,17 @@ from backend.interfaces.embeddings import (
     EmbeddingRequest,
     EmbeddingResponse,
 )
+from backend.interfaces.evidence import (
+    ConfigurationEvidenceProvider,
+    DeploymentEvidenceProvider,
+    EvidenceProvider,
+    HistoricalIncidentsProvider,
+    InfrastructureEvidenceProvider,
+    KnowledgeBaseProvider,
+    LogsEvidenceProvider,
+    MetricsEvidenceProvider,
+    TracesEvidenceProvider,
+)
 from backend.interfaces.llm import LLMMessage, LLMProvider, LLMRequest, LLMResponse
 from backend.interfaces.retrieval import (
     RetrievalHit,
@@ -21,13 +32,21 @@ from backend.interfaces.tools import (
 )
 
 __all__ = [
+    "ConfigurationEvidenceProvider",
+    "DeploymentEvidenceProvider",
     "EmbeddingProvider",
     "EmbeddingRequest",
     "EmbeddingResponse",
+    "EvidenceProvider",
+    "HistoricalIncidentsProvider",
+    "InfrastructureEvidenceProvider",
+    "KnowledgeBaseProvider",
     "LLMMessage",
     "LLMProvider",
     "LLMRequest",
     "LLMResponse",
+    "LogsEvidenceProvider",
+    "MetricsEvidenceProvider",
     "ProviderContext",
     "ProviderRegistry",
     "ProviderUsage",
@@ -39,4 +58,5 @@ __all__ = [
     "ToolExecutionResult",
     "ToolExecutor",
     "ToolInvocation",
+    "TracesEvidenceProvider",
 ]
