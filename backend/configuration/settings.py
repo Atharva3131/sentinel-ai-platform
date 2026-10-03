@@ -213,6 +213,171 @@ class FeatureFlagSettings(BaseModel):
     audit_trail: bool = True
 
 
+class DeploymentProviderName(StrEnum):
+    """Supported deployment provider names."""
+
+    GITHUB_ACTIONS = "github_actions"
+    FAKE = "fake"
+
+
+class DeploymentSettings(BaseModel):
+    """Deployment provider configuration.
+
+    Disabled by default.  Set ``enabled=true`` and configure the provider
+    to activate automated deployment triggering.
+
+    Environment variable examples::
+
+        SENTINEL_DEPLOYMENT__ENABLED=true
+        SENTINEL_DEPLOYMENT__PROVIDER=github_actions
+        SENTINEL_DEPLOYMENT__WORKFLOW=deploy.yml
+        SENTINEL_DEPLOYMENT__ENVIRONMENT=staging
+        SENTINEL_DEPLOYMENT__TIMEOUT_SECONDS=600
+        SENTINEL_DEPLOYMENT__POLL_INTERVAL_SECONDS=10
+    """
+
+    enabled: bool = False
+    provider: DeploymentProviderName = DeploymentProviderName.FAKE
+    # GitHub Actions workflow filename (e.g. "deploy.yml")
+    workflow: str = "deploy.yml"
+    # Deployment target environment name (e.g. "staging", "production")
+    environment: str = "staging"
+    # Maximum seconds to wait for a deployment to complete
+    timeout_seconds: float = Field(default=600.0, gt=0.0)
+    # Polling interval when waiting for deployment completion
+    poll_interval_seconds: float = Field(default=15.0, gt=0.0)
+    # Retry settings for transient API failures
+    max_retries: int = Field(default=3, ge=0)
+    retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
+
+
+class GitHubSettings(BaseModel):
+    """GitHub API configuration for the remediation integration.
+
+    Disabled by default — set ``enabled=true`` to activate.
+    The ``token`` must arrive through environment variables or secret files;
+    it is stored as ``SecretStr`` and never logged.
+
+    Environment variable examples::
+
+        SENTINEL_GITHUB__ENABLED=true
+        SENTINEL_GITHUB__TOKEN=ghp_...
+        SENTINEL_GITHUB__DEFAULT_OWNER=my-org
+        SENTINEL_GITHUB__DEFAULT_REPOSITORY=my-repo
+    """
+
+    enabled: bool = False
+    base_url: str = "https://api.github.com"
+    token: SecretStr | None = None
+    default_owner: str = ""
+    default_repository: str = ""
+    timeout_seconds: float = Field(default=30.0, gt=0.0)
+    max_retries: int = Field(default=3, ge=0)
+    retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
+    # Maximum items returned per paginated list call
+    per_page: int = Field(default=30, ge=1, le=100)
+
+
+class EvidenceProviderName(StrEnum):
+    """Supported evidence provider names — one per source kind."""
+
+    PROMETHEUS = "prometheus"
+    ELASTIC = "elastic"
+    OTLP = "otlp"          # Jaeger-compatible OTLP HTTP
+    FAKE = "fake"
+
+
+class EvidenceProviderSettings(BaseModel):
+    """Shared settings for a single evidence source provider.
+
+    Credentials arrive only through environment variables / secret files;
+    they are never embedded in source code.  ``api_key`` and ``password`` are
+    ``SecretStr`` to prevent accidental log exposure.
+    """
+
+    name: EvidenceProviderName = EvidenceProviderName.FAKE
+    enabled: bool = True
+    base_url: str = ""
+    api_key: SecretStr | None = None
+    username: str | None = None
+    password: SecretStr | None = None
+    timeout_seconds: float = Field(default=30.0, gt=0.0)
+    max_retries: int = Field(default=3, ge=0)
+    retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=5.0, gt=0.0)
+    # Default window passed when no per-request window is given
+    default_window_seconds: float = Field(default=300.0, gt=0.0)
+    # Upper bound on items returned per collection call
+    max_items: int = Field(default=20, ge=1)
+
+
+class EvidenceSettings(BaseModel):
+    """Evidence collection provider configuration.
+
+    Each source kind (metrics, logs, traces) has its own provider settings so
+    different systems can be used for each.  Set ``name=fake`` for any provider
+    to use the in-memory fake — no network calls are made.
+
+    Environment variable examples::
+
+        SENTINEL_EVIDENCE__METRICS__NAME=prometheus
+        SENTINEL_EVIDENCE__METRICS__BASE_URL=http://prometheus:9090
+        SENTINEL_EVIDENCE__LOGS__NAME=elastic
+        SENTINEL_EVIDENCE__LOGS__BASE_URL=http://elasticsearch:9200
+        SENTINEL_EVIDENCE__LOGS__USERNAME=elastic
+        SENTINEL_EVIDENCE__LOGS__PASSWORD=changeme
+        SENTINEL_EVIDENCE__TRACES__NAME=otlp
+        SENTINEL_EVIDENCE__TRACES__BASE_URL=http://jaeger:16686
+    """
+
+    metrics: EvidenceProviderSettings = Field(
+        default_factory=EvidenceProviderSettings
+    )
+    logs: EvidenceProviderSettings = Field(
+        default_factory=EvidenceProviderSettings
+    )
+    traces: EvidenceProviderSettings = Field(
+        default_factory=EvidenceProviderSettings
+    )
+
+
+class LLMProviderName(StrEnum):
+    """Supported LLM provider names."""
+
+    SARVAM = "sarvam"
+    MISTRAL = "mistral"
+    FAKE = "fake"
+
+
+class LLMProviderSettings(BaseModel):
+    """Configuration for one LLM provider (primary or fallback)."""
+
+    name: LLMProviderName = LLMProviderName.FAKE
+    api_key: SecretStr | None = None
+    model: str = "sarvam-105b"
+    base_url: str = "https://api.sarvam.ai/v1"
+    timeout_seconds: float = Field(default=60.0, gt=0.0)
+    max_retries: int = Field(default=3, ge=0)
+    retry_min_wait_seconds: float = Field(default=1.0, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
+    # Model defaults
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+
+
+class LLMSettings(BaseModel):
+    """LLM provider configuration — primary and optional fallback."""
+
+    primary: LLMProviderSettings = Field(
+        default_factory=LLMProviderSettings
+    )
+    fallback: LLMProviderSettings | None = None
+    # When True, automatically fall back to the fallback provider on errors
+    enable_fallback: bool = True
+
+
 class AppSettings(BaseSettings):
     """Root application settings loaded from environment variables and secret files."""
 
@@ -242,6 +407,10 @@ class AppSettings(BaseSettings):
     blob: BlobStorageSettings = Field(default_factory=BlobStorageSettings)
     health: HealthSettings = Field(default_factory=HealthSettings)
     feature_flags: FeatureFlagSettings = Field(default_factory=FeatureFlagSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    evidence: EvidenceSettings = Field(default_factory=EvidenceSettings)
+    github: GitHubSettings = Field(default_factory=GitHubSettings)
+    deployment: DeploymentSettings = Field(default_factory=DeploymentSettings)
 
     @classmethod
     def settings_customise_sources(

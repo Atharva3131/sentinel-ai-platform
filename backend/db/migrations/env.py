@@ -10,6 +10,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import backend.db.models  # noqa: F401 — registers all ORM models with Base.metadata
 from backend.configuration import load_settings
 from backend.db.base import Base
 

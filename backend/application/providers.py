@@ -20,12 +20,17 @@ from backend.configuration.settings import (
     AppSettings,
     AzureCredentialSettings,
     FeatureFlagSettings,
+    LLMSettings,
     LoggingSettings,
     OpenTelemetrySettings,
 )
 from backend.db.health import PostgresHealthCheck
+from backend.db.repositories.incident import PostgreSQLIncidentRepository
 from backend.db.retry import RetryPolicy
 from backend.db.session import DatabaseSessionManager
+from backend.evaluation.engine import EvaluationEngine
+from backend.evaluation.registry import EvaluationRegistry
+from backend.evaluation.strategies.investigation import register_investigation_strategies
 from backend.events.workflow_streams import RedisWorkflowEventPublisher
 from backend.infrastructure.cosmos import (
     CosmosConnection,
@@ -34,6 +39,18 @@ from backend.infrastructure.cosmos import (
 )
 from backend.infrastructure.neo4j import Neo4jConnection, Neo4jCypherExecutor
 from backend.infrastructure.redis import RedisConnection
+from backend.interfaces.evidence import (
+    LogsEvidenceProvider,
+    MetricsEvidenceProvider,
+    TracesEvidenceProvider,
+)
+from backend.interfaces.llm import LLMProvider
+from backend.providers.evidence.factory import (
+    build_logs_provider,
+    build_metrics_provider,
+    build_traces_provider,
+)
+from backend.providers.llm.factory import build_llm_provider
 from backend.queues.redis import (
     RedisDeadLetterQueue,
     RedisLockManager,
@@ -43,6 +60,9 @@ from backend.queues.redis import (
 )
 from backend.runtime import RuntimeFactory, RuntimeRegistry
 from backend.runtime.middleware import RuntimeMiddlewarePipeline
+from backend.services.evidence_orchestrator import EvidenceOrchestrator
+from backend.services.incident_ingestion import IncidentIngestionService
+from backend.services.investigation_evaluation import InvestigationEvaluator
 from backend.telemetry import TelemetryHandle
 
 
@@ -76,6 +96,62 @@ class ApplicationProvider(Provider):
     @provide(scope=Scope.APP)
     def azure_credentials_settings(self, settings: AppSettings) -> AzureCredentialSettings:
         return settings.azure
+
+    @provide(scope=Scope.APP)
+    def evaluation_registry(self) -> EvaluationRegistry:
+        """Build and return the EvaluationRegistry with all investigation strategies."""
+        registry = EvaluationRegistry()
+        register_investigation_strategies(registry)
+        return registry
+
+    @provide(scope=Scope.APP)
+    def evaluation_engine(self, registry: EvaluationRegistry) -> EvaluationEngine:
+        """Return an EvaluationEngine backed by the investigation strategy registry."""
+        return EvaluationEngine(
+            registry=registry,
+            default_fail_fast=False,
+            default_timeout_seconds=10.0,
+        )
+
+    @provide(scope=Scope.APP)
+    def investigation_evaluator(self, engine: EvaluationEngine) -> InvestigationEvaluator:
+        """Return the InvestigationEvaluator wired to the EvaluationEngine."""
+        return InvestigationEvaluator(engine=engine)
+
+    @provide(scope=Scope.APP)
+    def metrics_evidence_provider(self, settings: AppSettings) -> MetricsEvidenceProvider:
+        """Return the configured metrics evidence provider (fake or Prometheus)."""
+        return build_metrics_provider(settings.evidence)
+
+    @provide(scope=Scope.APP)
+    def logs_evidence_provider(self, settings: AppSettings) -> LogsEvidenceProvider:
+        """Return the configured logs evidence provider (fake or Elastic)."""
+        return build_logs_provider(settings.evidence)
+
+    @provide(scope=Scope.APP)
+    def traces_evidence_provider(self, settings: AppSettings) -> TracesEvidenceProvider:
+        """Return the configured traces evidence provider (fake or OTLP)."""
+        return build_traces_provider(settings.evidence)
+
+    @provide(scope=Scope.APP)
+    def evidence_orchestrator(
+        self,
+        metrics: MetricsEvidenceProvider,
+        logs: LogsEvidenceProvider,
+        traces: TracesEvidenceProvider,
+    ) -> EvidenceOrchestrator:
+        """Return an EvidenceOrchestrator pre-wired with all three providers."""
+        return EvidenceOrchestrator(
+            providers=[metrics, logs, traces],
+        )
+
+    @provide(scope=Scope.APP)
+    def llm_settings(self, settings: AppSettings) -> LLMSettings:
+        return settings.llm
+
+    @provide(scope=Scope.APP)
+    def llm_provider(self, settings: AppSettings) -> LLMProvider:
+        return build_llm_provider(settings.llm)
 
     @provide(scope=Scope.APP)
     def feature_flags(self, settings: AppSettings) -> FeatureFlagSettings:
@@ -219,11 +295,39 @@ class ApplicationProvider(Provider):
         return container.blob
 
     @provide(scope=Scope.REQUEST)
+    def incident_repository(
+        self,
+        session: AsyncSession,
+    ) -> PostgreSQLIncidentRepository:
+        return PostgreSQLIncidentRepository(session)
+
+    @provide(scope=Scope.REQUEST)
+    def incident_ingestion_service(
+        self,
+        repository: PostgreSQLIncidentRepository,
+    ) -> IncidentIngestionService:
+        return IncidentIngestionService(repository=repository)
+
+    @provide(scope=Scope.REQUEST)
     async def db_session(
         self,
         session_manager: DatabaseSessionManager,
     ) -> AsyncIterator[AsyncSession]:
         async with session_manager.session() as session:
+            yield session
+
+    @provide(scope=Scope.REQUEST)
+    async def db_transaction(
+        self,
+        session_manager: DatabaseSessionManager,
+    ) -> AsyncIterator[AsyncSession]:
+        """Yield a session inside an explicit transaction.
+
+        Use this when the route or service needs atomic multi-statement writes.
+        The incident ingestion router uses db_session (auto-commit on flush);
+        background batch operations should prefer db_transaction.
+        """
+        async with session_manager.transaction() as session:
             yield session
 
     @provide(scope=Scope.APP)

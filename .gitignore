@@ -1,21 +1,46 @@
+# Environment / secrets
 .env
 .env.*
 !.env.example
+
+# Python
 .venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# Testing / coverage
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .coverage
 htmlcov/
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
 dist/
 build/
+
+# IDEs
 .idea/
 .vscode/
+
+# Logs
 *.log
+logs/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Local AI coding agents / instructions
+.codex/
+CLAUDE.local.md
+
+# Local databases / persistent service data
 postgres-data/
 redis-data/
 neo4j-data/

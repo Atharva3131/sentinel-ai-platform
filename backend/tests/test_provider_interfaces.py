@@ -27,6 +27,8 @@ from backend.interfaces import (
 
 
 class FakeLLMProvider:
+    name = "fake-llm-test"
+
     async def generate(self, request: LLMRequest) -> LLMResponse:
         return LLMResponse(
             content=request.messages[-1].content.upper(),
