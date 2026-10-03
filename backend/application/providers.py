@@ -79,7 +79,7 @@ class ApplicationProvider(Provider):
         settings: AppSettings,
         telemetry: TelemetryHandle,
     ) -> AsyncIterator[ApplicationContainer]:
-        container = ApplicationContainer.build_with_telemetry(settings, telemetry)
+        container = await ApplicationContainer.build_with_telemetry(settings, telemetry)
         try:
             yield container
         finally:

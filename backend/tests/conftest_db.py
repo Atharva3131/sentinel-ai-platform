@@ -21,6 +21,7 @@ import os
 from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -31,7 +32,7 @@ _DATABASE_URL = os.getenv("DATABASE_URL")
 _SKIP_REASON = "DATABASE_URL environment variable is not set"
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session")
 async def pg_engine() -> AsyncIterator[AsyncEngine]:
     """Session-scoped async engine; skipped when DATABASE_URL is absent."""
     if _DATABASE_URL is None:
@@ -45,7 +46,7 @@ async def pg_engine() -> AsyncIterator[AsyncEngine]:
     await engine.dispose()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def pg_session(pg_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     """Function-scoped session wrapped in a rolled-back transaction."""
     from sqlalchemy.ext.asyncio import async_sessionmaker

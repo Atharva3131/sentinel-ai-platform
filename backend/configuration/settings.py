@@ -76,6 +76,18 @@ class AzureCredentialSettings(BaseModel):
                 )
         return self
 
+class KeyVaultSettings(BaseModel):
+    """Azure Key Vault configuration."""
+
+    enabled: bool = False
+    url: str | None = None
+    postgres_password_secret: str = "postgres-admin-password"
+
+    @model_validator(mode="after")
+    def validate_enabled(self) -> Self:
+        if self.enabled and not self.url:
+            raise ValueError("key_vault.url must be configured when Key Vault is enabled")
+        return self
 
 class PostgresSettings(BaseModel):
     """PostgreSQL connectivity and pool settings."""
@@ -400,6 +412,7 @@ class AppSettings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     opentelemetry: OpenTelemetrySettings = Field(default_factory=OpenTelemetrySettings)
     azure: AzureCredentialSettings = Field(default_factory=AzureCredentialSettings)
+    key_vault: KeyVaultSettings = Field(default_factory=KeyVaultSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
