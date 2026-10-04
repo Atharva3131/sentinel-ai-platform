@@ -12,6 +12,10 @@ Design:
   * Dependency injection is provided by Dishka via FromDishka[T] annotations.
   * The router converts domain objects to response schemas at the boundary.
   * HTTP 422 is returned by FastAPI/Pydantic for validation errors automatically.
+  * After successful ingestion of a NEW incident, the ClosedLoopOrchestrator
+    is invoked inline.  The incident is already persisted at that point, so
+    orchestration failures cannot lose data — they are logged and the 201
+    response is returned regardless.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ from backend.models.incident import (
     SignalSource,
     SignalType,
 )
+from backend.services.closed_loop_orchestrator import ClosedLoopOrchestrator
 from backend.services.incident_ingestion import (
     IncidentIngestionService,
     IncidentValidationError,
@@ -82,6 +87,7 @@ router = APIRouter(
 async def create_incident(
     body: CreateIncidentRequest,
     ingestion_service: FromDishka[IncidentIngestionService],
+    closed_loop_orchestrator: FromDishka[ClosedLoopOrchestrator],
 ) -> CreateIncidentResponse:
     """Accept an incident from any source (API, event bridge, monitoring adapter).
 
@@ -89,6 +95,11 @@ async def create_incident(
     incident, the existing incident is returned with ``is_duplicate=True`` and
     HTTP 200 instead of 201.  The caller may inspect ``existing_incident_id``
     to retrieve the original.
+
+    For new incidents, after persistence the ClosedLoopOrchestrator is invoked
+    inline to drive the investigation → remediation → deployment → verification
+    lifecycle.  Orchestration failures are logged but do not affect the 201
+    response — the incident is already safely persisted.
     """
     incident = _request_to_domain(body)
     bound_log = log.bind(incident_id=incident.incident_id, correlation_id=incident.correlation_id)
@@ -113,16 +124,6 @@ async def create_incident(
             detail="Unexpected error during incident ingestion",
         ) from exc
 
-    http_status = (
-        status.HTTP_200_OK if result.is_duplicate else status.HTTP_201_CREATED
-    )
-    # FastAPI doesn't let us override status_code dynamically inside the function
-    # body, so we return the response model directly — the status code is set to
-    # 201 by default; duplicates are still returned as 201 with is_duplicate=True.
-    # To return 200, the route must use Response directly; here we accept 201 for
-    # simplicity and communicate the duplicate via the payload flag.
-    _ = http_status  # retained for clarity
-
     bound_log.info(
         "incident_api_created",
         is_duplicate=result.is_duplicate,
@@ -130,6 +131,19 @@ async def create_incident(
             result.existing.incident_id if result.existing else None
         ),
     )
+
+    # Only trigger the closed-loop for genuinely new incidents.
+    # Duplicates already have an active orchestration cycle in progress.
+    if not result.is_duplicate:
+        try:
+            await closed_loop_orchestrator.run(result.incident)
+        except Exception as exc:
+            # The incident is persisted — log the failure and return 201.
+            bound_log.error(
+                "closed_loop_orchestration_failed",
+                error=str(exc),
+                incident_id=result.incident.incident_id,
+            )
 
     return CreateIncidentResponse(
         incident=_domain_to_response(result.incident),

@@ -229,6 +229,37 @@ class FeatureFlagSettings(BaseModel):
     audit_trail: bool = True
 
 
+class AzureMonitorMetricsSettings(BaseModel):
+    """Azure Monitor / Application Insights metrics query configuration.
+
+    Used by ``AzureMonitorMetricsSnapshot`` (the production ``MetricsSnapshotPort``
+    implementation) to query per-service metric values for the closed-loop
+    verification step.
+
+    Authentication priority:
+      1. ``api_key`` — API key sent as ``x-api-key`` (no AAD needed).
+      2. AAD credential from ``AzureCredentialSettings`` (Managed Identity /
+         Service Principal) when ``api_key`` is not set.
+
+    Environment variable examples::
+
+        SENTINEL_AZURE_MONITOR_METRICS__ENABLED=true
+        SENTINEL_AZURE_MONITOR_METRICS__APP_ID=<Application-Insights-app-id>
+        SENTINEL_AZURE_MONITOR_METRICS__API_KEY=<api-access-key>
+    """
+
+    enabled: bool = False
+    # Application Insights application ID (GUID or app-short-name)
+    app_id: str = ""
+    # API key — when set, bypasses AAD token acquisition
+    api_key: SecretStr | None = None
+    base_url: str = "https://api.applicationinsights.io"
+    timeout_seconds: float = Field(default=30.0, gt=0.0)
+    max_retries: int = Field(default=3, ge=0)
+    retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
+
+
 class DeploymentProviderName(StrEnum):
     """Supported deployment provider names."""
 
@@ -428,6 +459,9 @@ class AppSettings(BaseSettings):
     evidence: EvidenceSettings = Field(default_factory=EvidenceSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     deployment: DeploymentSettings = Field(default_factory=DeploymentSettings)
+    azure_monitor_metrics: AzureMonitorMetricsSettings = Field(
+        default_factory=AzureMonitorMetricsSettings
+    )
 
     @classmethod
     def settings_customise_sources(

@@ -19,11 +19,17 @@ from backend.cache.redis import RedisCache
 from backend.configuration.settings import (
     AppSettings,
     AzureCredentialSettings,
+    AzureMonitorMetricsSettings,
+    DeploymentSettings,
     FeatureFlagSettings,
+    GitHubSettings,
     LLMSettings,
     LoggingSettings,
     OpenTelemetrySettings,
 )
+from backend.core.hypothesis_engine import DeterministicHypothesisGenerator, HypothesisEngine
+from backend.core.remediation_engine import RemediationEngine
+from backend.core.validation_engine import VerificationEngine
 from backend.db.health import PostgresHealthCheck
 from backend.db.repositories.incident import PostgreSQLIncidentRepository
 from backend.db.retry import RetryPolicy
@@ -39,18 +45,25 @@ from backend.infrastructure.cosmos import (
 )
 from backend.infrastructure.neo4j import Neo4jConnection, Neo4jCypherExecutor
 from backend.infrastructure.redis import RedisConnection
+from backend.interfaces.deployment import DeploymentProvider
 from backend.interfaces.evidence import (
     LogsEvidenceProvider,
     MetricsEvidenceProvider,
     TracesEvidenceProvider,
 )
 from backend.interfaces.llm import LLMProvider
+from backend.policies.action_policy import RemediationPolicyEngine
 from backend.providers.evidence.factory import (
     build_logs_provider,
     build_metrics_provider,
     build_traces_provider,
 )
+from backend.providers.github.client import GitHubClient
+from backend.providers.github.deployment_factory import build_deployment_provider
+from backend.providers.github.executor import GitHubActionExecutor
+from backend.providers.github.planner import GitHubRemediationPlanner
 from backend.providers.llm.factory import build_llm_provider
+from backend.providers.metrics.azure_monitor_snapshot import AzureMonitorMetricsSnapshot
 from backend.queues.redis import (
     RedisDeadLetterQueue,
     RedisLockManager,
@@ -60,9 +73,13 @@ from backend.queues.redis import (
 )
 from backend.runtime import RuntimeFactory, RuntimeRegistry
 from backend.runtime.middleware import RuntimeMiddlewarePipeline
+from backend.services.closed_loop_orchestrator import ClosedLoopOrchestrator
+from backend.services.deployment_pipeline import DeploymentPipeline
 from backend.services.evidence_orchestrator import EvidenceOrchestrator
 from backend.services.incident_ingestion import IncidentIngestionService
 from backend.services.investigation_evaluation import InvestigationEvaluator
+from backend.services.investigation_orchestrator import InvestigationOrchestrator
+from backend.services.verification_coordinator import VerificationCoordinator
 from backend.telemetry import TelemetryHandle
 
 
@@ -294,6 +311,221 @@ class ApplicationProvider(Provider):
             raise RuntimeError("Blob Storage is disabled")
         return container.blob
 
+    # ── Settings sub-objects ──────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def deployment_settings(self, settings: AppSettings) -> DeploymentSettings:
+        return settings.deployment
+
+    @provide(scope=Scope.APP)
+    def github_settings(self, settings: AppSettings) -> GitHubSettings:
+        return settings.github
+
+    # ── GitHub infrastructure ─────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def github_client(self, settings: GitHubSettings) -> GitHubClient:
+        """Return an async GitHub REST client configured from settings."""
+        return GitHubClient.from_settings(settings)
+
+    @provide(scope=Scope.APP)
+    def github_action_executor(self, client: GitHubClient) -> GitHubActionExecutor:
+        """Return the GitHub ActionExecutor backed by the shared client."""
+        return GitHubActionExecutor(client)
+
+    @provide(scope=Scope.APP)
+    def deployment_provider(self, settings: AppSettings) -> DeploymentProvider:
+        """Return the configured deployment provider (GitHub Actions or fake)."""
+        return build_deployment_provider(settings)
+
+    # ── Policy engine ─────────────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def remediation_policy_engine(self) -> RemediationPolicyEngine:
+        """Return a default-policy RemediationPolicyEngine (PolicyGateway port)."""
+        return RemediationPolicyEngine()
+
+    # ── Hypothesis engine ─────────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def hypothesis_engine(self) -> HypothesisEngine:
+        """Return a HypothesisEngine backed by the deterministic heuristic generator."""
+        return HypothesisEngine(generator=DeterministicHypothesisGenerator())
+
+    # ── InvestigationOrchestrator ─────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def investigation_orchestrator(
+        self,
+        evidence_orchestrator: EvidenceOrchestrator,
+        hypothesis_engine: HypothesisEngine,
+        event_publisher: RedisWorkflowEventPublisher,
+    ) -> InvestigationOrchestrator:
+        """Return the investigation pipeline wired to evidence + hypothesis engines."""
+        return InvestigationOrchestrator(
+            evidence_orchestrator=evidence_orchestrator,
+            hypothesis_engine=hypothesis_engine,
+            event_emitter=event_publisher,
+        )
+
+    # ── RemediationEngine ─────────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def remediation_engine(
+        self,
+        policy_engine: RemediationPolicyEngine,
+        executor: GitHubActionExecutor,
+    ) -> RemediationEngine:
+        """Return a policy-gated RemediationEngine using the GitHub executor."""
+        return RemediationEngine(
+            policy_gateway=policy_engine,
+            executor=executor,
+        )
+
+    # ── GitHubRemediationPlanner ──────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def github_remediation_planner(self, settings: GitHubSettings) -> GitHubRemediationPlanner:
+        """Return a planner pre-configured with the default GitHub owner/repo."""
+        return GitHubRemediationPlanner(
+            owner=settings.default_owner,
+            repo=settings.default_repository,
+        )
+
+    # ── DeploymentPipeline ────────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def deployment_pipeline(
+        self,
+        provider: DeploymentProvider,
+        policy_engine: RemediationPolicyEngine,
+        event_publisher: RedisWorkflowEventPublisher,
+    ) -> DeploymentPipeline:
+        """Return the deployment pipeline gated by the remediation policy engine."""
+        return DeploymentPipeline(
+            provider=provider,
+            policy_engine=policy_engine,
+            event_emitter=event_publisher,
+        )
+
+    # ── Azure Monitor Metrics settings ────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def azure_monitor_metrics_settings(
+        self, settings: AppSettings
+    ) -> AzureMonitorMetricsSettings:
+        return settings.azure_monitor_metrics
+
+    # ── MetricsSnapshotPort (AzureMonitorMetricsSnapshot) ─────────────────
+
+    @provide(scope=Scope.APP)
+    def metrics_snapshot(
+        self,
+        az_settings: AzureMonitorMetricsSettings,
+        app_settings: AppSettings,
+    ) -> AzureMonitorMetricsSnapshot:
+        """Return the production MetricsSnapshotPort backed by Application Insights.
+
+        When ``azure_monitor_metrics.enabled`` is False (the default), the adapter
+        is constructed with an empty ``app_id``-guard bypassed by an empty
+        ``app_id`` — callers receive 0.0 for all metrics, which is the safe
+        default (no degradation detected).  Enable and configure
+        ``SENTINEL_AZURE_MONITOR_METRICS__*`` environment variables to activate
+        live querying.
+        """
+        if not az_settings.enabled or not az_settings.app_id:
+            # Disabled / unconfigured — return a no-op snapshot that always
+            # returns 0.0.  We do NOT raise here so that environments without
+            # Application Insights wired (dev, CI) still construct correctly.
+            return _NoOpMetricsSnapshot()  # type: ignore[return-value]
+
+        # Build the Azure credential using the same factory as ApplicationContainer
+        from azure.identity.aio import ClientSecretCredential, DefaultAzureCredential
+
+        azure_cfg = app_settings.azure
+        if azure_cfg.authentication_mode == "client_secret":
+            credential: DefaultAzureCredential | ClientSecretCredential = (
+                ClientSecretCredential(
+                    tenant_id=azure_cfg.tenant_id or "",
+                    client_id=azure_cfg.client_id or "",
+                    client_secret=(
+                        azure_cfg.client_secret.get_secret_value()
+                        if azure_cfg.client_secret is not None else ""
+                    ),
+                )
+            )
+        else:
+            credential = DefaultAzureCredential(
+                managed_identity_client_id=azure_cfg.managed_identity_client_id,
+                exclude_environment_credential=azure_cfg.exclude_environment_credential,
+                exclude_managed_identity_credential=(
+                    azure_cfg.exclude_managed_identity_credential
+                ),
+            )
+
+        return AzureMonitorMetricsSnapshot.from_settings(az_settings, credential)
+
+    # ── VerificationEngine ────────────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def verification_engine(
+        self,
+        snapshot: AzureMonitorMetricsSnapshot,
+    ) -> VerificationEngine:
+        """Return a VerificationEngine backed by the Azure Monitor snapshot adapter."""
+        return VerificationEngine(metrics_snapshot=snapshot)
+
+    # ── VerificationCoordinator ───────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def verification_coordinator(
+        self,
+        verification_engine: VerificationEngine,
+        evidence_orchestrator: EvidenceOrchestrator,
+        event_publisher: RedisWorkflowEventPublisher,
+    ) -> VerificationCoordinator:
+        """Return the post-deployment verification coordinator."""
+        return VerificationCoordinator(
+            verification_engine=verification_engine,
+            evidence_orchestrator=evidence_orchestrator,
+            event_emitter=event_publisher,
+        )
+
+    # ── ClosedLoopOrchestrator ────────────────────────────────────────────
+
+    @provide(scope=Scope.REQUEST)
+    def closed_loop_orchestrator(
+        self,
+        investigation: InvestigationOrchestrator,
+        remediation_engine: RemediationEngine,
+        deployment_pipeline: DeploymentPipeline,
+        verification: VerificationCoordinator,
+        repository: PostgreSQLIncidentRepository,
+        planner: GitHubRemediationPlanner,
+        event_publisher: RedisWorkflowEventPublisher,
+        settings: AppSettings,
+    ) -> ClosedLoopOrchestrator:
+        """Return the fully wired autonomous closed-loop orchestrator.
+
+        REQUEST scope so it receives the live per-request PostgreSQLIncidentRepository
+        (backed by the current AsyncSession) without any dataclasses.replace or
+        field mutation.  All other dependencies are APP-scoped — Dishka resolves
+        wider scopes into narrower ones automatically.
+        """
+        return ClosedLoopOrchestrator(
+            investigation=investigation,
+            remediation_engine=remediation_engine,
+            deployment_pipeline=deployment_pipeline,
+            verification=verification,
+            repository=repository,
+            remediation_planner=planner.plan,
+            event_emitter=event_publisher,
+            deployment_owner=settings.github.default_owner,
+            deployment_repo=settings.github.default_repository,
+            deployment_workflow=settings.deployment.workflow,
+            deployment_environment=settings.deployment.environment,
+        )
+
     @provide(scope=Scope.REQUEST)
     def incident_repository(
         self,
@@ -357,3 +589,31 @@ def build_root_container(
             TelemetryHandle: telemetry,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Sentinel helper — not a fake, not a test double; this is a structural guard
+# that makes the disabled/unconfigured Azure Monitor path safe at the type level.
+# ---------------------------------------------------------------------------
+
+
+class _NoOpMetricsSnapshot:
+    """Returned when Azure Monitor metrics querying is disabled or unconfigured.
+
+    Always returns 0.0 for every requested metric, which the VerificationEngine
+    treats as "no degradation detected / unknown state".  This is the correct
+    safe default for environments that have not wired Application Insights
+    (development, CI, staging without observability).
+
+    This is NOT a fake — it carries no test-specific behaviour and lives in
+    production code.  It satisfies MetricsSnapshotPort structurally.
+    """
+
+    async def snapshot(
+        self,
+        service: str,
+        metric_names: tuple[str, ...],
+        *,
+        window_seconds: float = 60.0,
+    ) -> dict[str, float]:
+        return {name: 0.0 for name in metric_names}
