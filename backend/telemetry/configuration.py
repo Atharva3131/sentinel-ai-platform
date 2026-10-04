@@ -137,6 +137,16 @@ def configure_telemetry(settings: AppSettings, app: FastAPI) -> TelemetryHandle:
             timeout=settings.opentelemetry.export_timeout_seconds,
         )
         provider.add_span_processor(BatchSpanProcessor(exporter))
+
+    # Optional Azure Monitor / Application Insights exporter.
+    # Attached to the same TracerProvider as BatchSpanProcessor — no second provider.
+    # Connection string is retrieved from SecretStr and never logged.
+    if settings.opentelemetry.azure_monitor_connection_string:
+        _attach_azure_monitor_exporter(
+            provider,
+            settings.opentelemetry.azure_monitor_connection_string.get_secret_value(),
+        )
+
     trace.set_tracer_provider(provider)
 
     metric_reader = PrometheusMetricReader()
@@ -180,3 +190,30 @@ def _parse_otlp_headers(headers: SecretStr | None) -> dict[str, str] | None:
             continue
         parsed_headers[key.strip()] = value.strip()
     return parsed_headers or None
+
+
+def _attach_azure_monitor_exporter(
+    provider: TracerProvider,
+    connection_string: str,
+) -> None:
+    """Attach an AzureMonitorTraceExporter to *provider* as a BatchSpanProcessor.
+
+    Importing ``azure.monitor.opentelemetry.exporter`` is deferred to this
+    function so the package is only required when the connection string is
+    actually configured.  If the package is missing a clear ImportError is
+    raised rather than a cryptic AttributeError.
+
+    The connection string is accepted as a plain string here — the caller
+    must obtain it from a ``SecretStr`` value and must never log it.
+    """
+    try:
+        from azure.monitor.opentelemetry.exporter import AzureMonitorTraceExporter
+    except ImportError as exc:
+        raise ImportError(
+            "azure-monitor-opentelemetry-exporter is not installed. "
+            "Add it to your dependencies or leave "
+            "SENTINEL_OPENTELEMETRY__AZURE_MONITOR_CONNECTION_STRING unset."
+        ) from exc
+
+    azure_exporter = AzureMonitorTraceExporter(connection_string=connection_string)
+    provider.add_span_processor(BatchSpanProcessor(azure_exporter))

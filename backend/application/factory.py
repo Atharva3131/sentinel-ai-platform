@@ -16,7 +16,7 @@ from backend.application.providers import build_root_container
 from backend.configuration import AppSettings, get_settings
 from backend.logging import configure_logging
 from backend.middleware import ExceptionLoggingMiddleware, RequestContextMiddleware
-from backend.telemetry import TelemetryHandle, configure_telemetry
+from backend.telemetry import configure_telemetry
 
 
 def create_application(
@@ -28,20 +28,36 @@ def create_application(
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.logging)
     logger = structlog.get_logger(__name__)
-    telemetry: TelemetryHandle | None = None
+
+    app = FastAPI(
+        title="Sentinel AI Platform API",
+        version=resolved_settings.app_version,
+        debug=resolved_settings.debug,
+        docs_url="/docs" if not resolved_settings.is_production else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if not resolved_settings.is_production else None,
+    )
+    app.add_middleware(ExceptionLoggingMiddleware)
+    app.add_middleware(RequestContextMiddleware)
+    app.include_router(build_api_router())
+
+    telemetry = configure_telemetry(resolved_settings, app)
+
+    root_container = build_root_container(
+        resolved_settings,
+        telemetry=telemetry,
+        override_providers=tuple(override_providers or ()),
+    )
+
+    # Dishka's middleware must be installed before the application starts.
+    setup_dishka(root_container, app)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        root_container = build_root_container(
-            resolved_settings,
-            telemetry=telemetry or TelemetryHandle(),
-            override_providers=tuple(override_providers or ()),
-        )
         async with root_container as app_container:
-            setup_dishka(app_container, app)
             engine = await app_container.get(AsyncEngine)
-            if telemetry is not None:
-                telemetry.instrument_sqlalchemy(engine)
+            telemetry.instrument_sqlalchemy(engine)
+
             logger.info(
                 "application_started",
                 service=resolved_settings.app_name,
@@ -51,21 +67,12 @@ def create_application(
             try:
                 yield
             finally:
-                if telemetry is not None:
-                    await telemetry.shutdown()
-                logger.info("application_stopped", service=resolved_settings.app_name)
+                await telemetry.shutdown()
+                logger.info(
+                    "application_stopped",
+                    service=resolved_settings.app_name,
+                )
 
-    app = FastAPI(
-        title="Sentinel AI Platform API",
-        version=resolved_settings.app_version,
-        debug=resolved_settings.debug,
-        docs_url="/docs" if not resolved_settings.is_production else None,
-        redoc_url=None,
-        openapi_url="/openapi.json" if not resolved_settings.is_production else None,
-        lifespan=lifespan,
-    )
-    app.add_middleware(ExceptionLoggingMiddleware)
-    app.add_middleware(RequestContextMiddleware)
-    app.include_router(build_api_router())
-    telemetry = configure_telemetry(resolved_settings, app)
+    app.router.lifespan_context = lifespan
+
     return app

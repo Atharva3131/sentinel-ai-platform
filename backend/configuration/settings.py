@@ -52,6 +52,10 @@ class OpenTelemetrySettings(BaseModel):
     trace_sample_ratio: float = Field(default=0.1, ge=0.0, le=1.0)
     export_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
     exclude_health_endpoints: bool = True
+    # Optional Azure Monitor / Application Insights export.
+    # When set, traces are exported to both OTLP (if configured) AND Azure Monitor.
+    # The connection string is a SecretStr — it is never logged or exposed.
+    azure_monitor_connection_string: SecretStr | None = None
 
 
 class AzureCredentialSettings(BaseModel):

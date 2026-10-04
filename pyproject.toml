@@ -7,8 +7,11 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "alembic>=1.14,<2",
   "asyncpg>=0.30,<1",
+  "aiohttp>=3.14.3",
   "azure-cosmos>=4.9,<5",
   "azure-identity>=1.19,<2",
+  "azure-keyvault-secrets>=4.11.3",
+  "azure-monitor-opentelemetry-exporter>=1.0.0b33,<2",
   "azure-storage-blob>=12.24,<13",
   "dishka>=1.10,<2",
   "fastapi>=0.115,<1",
@@ -29,8 +32,6 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0.36,<3",
   "structlog>=24.4,<27",
   "uvicorn[standard]>=0.34,<1",
-  "azure-keyvault-secrets>=4.11.3",
-  "aiohttp>=3.14.3",
 ]
 
 [dependency-groups]

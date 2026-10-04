@@ -17,13 +17,11 @@ WORKDIR /app
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --chown=sentinel:sentinel pyproject.toml uv.lock README.md ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=sentinel:sentinel backend ./backend
 COPY --chown=sentinel:sentinel main.py alembic.ini ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev
 
 USER sentinel
 

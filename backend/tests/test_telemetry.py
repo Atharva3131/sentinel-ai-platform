@@ -364,3 +364,234 @@ async def test_metrics_endpoint_returns_prometheus_payload(
     assert response.status_code == 200
     assert response.text == "sentinel 1\n"
     assert response.headers["content-type"].startswith("text/plain")
+
+
+# ---------------------------------------------------------------------------
+# Azure Monitor exporter tests
+# ---------------------------------------------------------------------------
+
+
+class FakeAzureMonitorTraceExporter:
+    """Stub for AzureMonitorTraceExporter — never touches the network."""
+
+    def __init__(self, *, connection_string: str) -> None:
+        # Must not store the connection string in a way that surfaces in repr/logs.
+        # We record only whether it was non-empty for assertion purposes.
+        self._configured = bool(connection_string)
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
+
+
+def _settings_with_azure(connection_string: str | None = None) -> AppSettings:
+    from pydantic import SecretStr
+    return AppSettings(
+        environment="development",
+        logging=LoggingSettings(level="INFO", json_output=True),
+        opentelemetry=OpenTelemetrySettings(
+            enabled=True,
+            otlp_http_endpoint="http://collector:4318/v1/traces",
+            trace_sample_ratio=1.0,
+            azure_monitor_connection_string=(
+                SecretStr(connection_string) if connection_string else None
+            ),
+        ),
+        neo4j={"enabled": False},
+        cosmos={"enabled": False},
+        blob={"enabled": False},
+    )
+
+
+@pytest.mark.asyncio
+async def test_azure_monitor_exporter_not_attached_when_connection_string_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When azure_monitor_connection_string is None, no Azure exporter is added."""
+    import backend.telemetry.configuration as cfg
+
+    tracer_provider = FakeTracerProvider()
+    meter_provider = FakeMeterProvider()
+
+    monkeypatch.setattr(cfg, "PrometheusMetricReader", FakePrometheusMetricReader)
+    monkeypatch.setattr(cfg, "OTLPSpanExporter", lambda **kwargs: kwargs)
+    monkeypatch.setattr(cfg, "BatchSpanProcessor", FakeSpanProcessor)
+    monkeypatch.setattr(cfg, "FastAPIInstrumentor", FakeFastAPIInstrumentor)
+    monkeypatch.setattr(cfg, "HTTPXClientInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "RedisInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "SQLAlchemyInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "TracerProvider", lambda **_: tracer_provider)
+    monkeypatch.setattr(cfg, "MeterProvider", lambda **_: meter_provider)
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(otel_metrics, "set_meter_provider", lambda provider: None)
+
+    app = FastAPI()
+    cfg.configure_telemetry(_settings_with_azure(connection_string=None), app)
+
+    # Only the OTLP processor should have been added — no Azure processor
+    assert len(tracer_provider.span_processors) == 1
+    otlp_processor = tracer_provider.span_processors[0]
+    assert isinstance(otlp_processor, FakeSpanProcessor)
+    # The exporter wrapped inside is a dict (from our OTLPSpanExporter lambda), not Azure
+    assert not isinstance(otlp_processor.exporter, FakeAzureMonitorTraceExporter)
+
+
+@pytest.mark.asyncio
+async def test_azure_monitor_exporter_attached_when_connection_string_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When azure_monitor_connection_string is set, Azure exporter is added as second processor."""
+    import backend.telemetry.configuration as cfg
+
+    tracer_provider = FakeTracerProvider()
+    meter_provider = FakeMeterProvider()
+
+    # Stub out the Azure Monitor package so the test works without the real SDK installed
+    fake_azure_exporter = FakeAzureMonitorTraceExporter(
+        connection_string="InstrumentationKey=fake-key"
+    )
+
+    def _fake_azure_attach(provider: Any, connection_string: str) -> None:
+        # Verify secret is passed as plain string (already extracted from SecretStr by caller)
+        assert isinstance(connection_string, str)
+        assert len(connection_string) > 0
+        # Attach a fake processor so we can count it
+        provider.add_span_processor(FakeSpanProcessor(fake_azure_exporter))
+
+    monkeypatch.setattr(cfg, "PrometheusMetricReader", FakePrometheusMetricReader)
+    monkeypatch.setattr(cfg, "OTLPSpanExporter", lambda **kwargs: kwargs)
+    monkeypatch.setattr(cfg, "BatchSpanProcessor", FakeSpanProcessor)
+    monkeypatch.setattr(cfg, "FastAPIInstrumentor", FakeFastAPIInstrumentor)
+    monkeypatch.setattr(cfg, "HTTPXClientInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "RedisInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "SQLAlchemyInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "TracerProvider", lambda **_: tracer_provider)
+    monkeypatch.setattr(cfg, "MeterProvider", lambda **_: meter_provider)
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(otel_metrics, "set_meter_provider", lambda provider: None)
+    monkeypatch.setattr(cfg, "_attach_azure_monitor_exporter", _fake_azure_attach)
+
+    app = FastAPI()
+    cfg.configure_telemetry(
+        _settings_with_azure(connection_string="InstrumentationKey=fake-key"), app
+    )
+
+    # Both OTLP and Azure processors should be present
+    assert len(tracer_provider.span_processors) == 2
+    azure_proc = tracer_provider.span_processors[1]
+    assert isinstance(azure_proc.exporter, FakeAzureMonitorTraceExporter)
+    assert azure_proc.exporter.configured is True
+
+
+@pytest.mark.asyncio
+async def test_otlp_exporter_still_present_alongside_azure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding Azure exporter must not remove the existing OTLP exporter."""
+    import backend.telemetry.configuration as cfg
+
+    meter_provider = FakeMeterProvider()
+    added_processors: list[Any] = []
+
+    class _TrackingProvider(FakeTracerProvider):
+        def add_span_processor(self, processor: Any) -> None:
+            added_processors.append(processor)
+            super().add_span_processor(processor)
+
+    tracking_provider = _TrackingProvider()
+
+    monkeypatch.setattr(cfg, "PrometheusMetricReader", FakePrometheusMetricReader)
+    monkeypatch.setattr(cfg, "OTLPSpanExporter", lambda **kwargs: {"kind": "otlp", **kwargs})
+    monkeypatch.setattr(cfg, "BatchSpanProcessor", FakeSpanProcessor)
+    monkeypatch.setattr(cfg, "FastAPIInstrumentor", FakeFastAPIInstrumentor)
+    monkeypatch.setattr(cfg, "HTTPXClientInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "RedisInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "SQLAlchemyInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "TracerProvider", lambda **_: tracking_provider)
+    monkeypatch.setattr(cfg, "MeterProvider", lambda **_: meter_provider)
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(otel_metrics, "set_meter_provider", lambda provider: None)
+
+    fake_azure_exporter = FakeAzureMonitorTraceExporter(connection_string="InstrumentationKey=x")
+
+    def _fake_attach(provider: Any, connection_string: str) -> None:
+        provider.add_span_processor(FakeSpanProcessor(fake_azure_exporter))
+
+    monkeypatch.setattr(cfg, "_attach_azure_monitor_exporter", _fake_attach)
+
+    app = FastAPI()
+    cfg.configure_telemetry(
+        _settings_with_azure(connection_string="InstrumentationKey=x"), app
+    )
+
+    assert len(added_processors) == 2
+    # First processor wraps the OTLP exporter (a dict with kind=otlp)
+    otlp_proc = added_processors[0]
+    assert isinstance(otlp_proc, FakeSpanProcessor)
+    assert isinstance(otlp_proc.exporter, dict)
+    assert otlp_proc.exporter.get("kind") == "otlp"
+    # Second processor wraps the Azure exporter
+    azure_proc = added_processors[1]
+    assert isinstance(azure_proc.exporter, FakeAzureMonitorTraceExporter)
+
+
+def test_attach_azure_monitor_raises_import_error_when_package_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_attach_azure_monitor_exporter raises ImportError when SDK is not installed."""
+    # Simulate the SDK not being installed by making the import fail
+    import builtins
+
+    import backend.telemetry.configuration as cfg
+    real_import = builtins.__import__
+
+    def _mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "azure.monitor.opentelemetry.exporter":
+            raise ImportError("No module named 'azure.monitor.opentelemetry.exporter'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _mock_import)
+
+    provider: Any = FakeTracerProvider()
+    with pytest.raises(ImportError, match="azure-monitor-opentelemetry-exporter"):
+        cfg._attach_azure_monitor_exporter(provider, "InstrumentationKey=test")
+
+
+def test_azure_monitor_connection_string_not_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Azure Monitor connection string must never appear in log output."""
+    import logging
+
+    import backend.telemetry.configuration as cfg
+
+    tracer_provider = FakeTracerProvider()
+    meter_provider = FakeMeterProvider()
+    secret = "InstrumentationKey=00000000-0000-0000-0000-000000000000"
+
+    def _fake_attach(provider: Any, connection_string: str) -> None:
+        # The secret value must not be logged by the calling code
+        pass
+
+    monkeypatch.setattr(cfg, "PrometheusMetricReader", FakePrometheusMetricReader)
+    monkeypatch.setattr(cfg, "OTLPSpanExporter", lambda **kwargs: kwargs)
+    monkeypatch.setattr(cfg, "BatchSpanProcessor", FakeSpanProcessor)
+    monkeypatch.setattr(cfg, "FastAPIInstrumentor", FakeFastAPIInstrumentor)
+    monkeypatch.setattr(cfg, "HTTPXClientInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "RedisInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "SQLAlchemyInstrumentor", FakeInstrumentor)
+    monkeypatch.setattr(cfg, "TracerProvider", lambda **_: tracer_provider)
+    monkeypatch.setattr(cfg, "MeterProvider", lambda **_: meter_provider)
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", lambda provider: None)
+    monkeypatch.setattr(otel_metrics, "set_meter_provider", lambda provider: None)
+    monkeypatch.setattr(cfg, "_attach_azure_monitor_exporter", _fake_attach)
+
+    app = FastAPI()
+    with caplog.at_level(logging.DEBUG):
+        cfg.configure_telemetry(_settings_with_azure(connection_string=secret), app)
+
+    for record in caplog.records:
+        assert secret not in record.getMessage(), (
+            f"Connection string leaked in log record: {record.getMessage()!r}"
+        )
