@@ -135,7 +135,7 @@ class ApplicationContainer:
             azure_credential = _build_azure_credential(settings)
             credentials.append(azure_credential)
 
-        # Resolve the PostgreSQL password before constructing the engine.
+        # Resolve secrets from Key Vault before constructing the engine.
         if settings.key_vault.enabled:
             if settings.key_vault.url is None:
                 raise ValueError(
@@ -153,13 +153,20 @@ class ApplicationContainer:
             )
 
             try:
+                # Resolve PostgreSQL password
                 password = await key_vault.get_secret(
                     settings.key_vault.postgres_password_secret
                 )
+                settings.postgres.password = SecretStr(password)
+
+                # Resolve LLM primary API key if not already set via environment
+                if settings.llm.primary.api_key is None:
+                    llm_api_key = await key_vault.get_secret(
+                        settings.key_vault.llm_primary_api_key_secret
+                    )
+                    settings.llm.primary.api_key = SecretStr(llm_api_key)
             finally:
                 await key_vault.close()
-
-            settings.postgres.password = SecretStr(password)
 
         # PostgreSQL is created only after the Key Vault secret is resolved.
         engine = create_postgres_engine(settings.postgres)

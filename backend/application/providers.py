@@ -44,6 +44,7 @@ from backend.infrastructure.cosmos import (
     CosmosPartitionStrategy,
 )
 from backend.infrastructure.neo4j import Neo4jConnection, Neo4jCypherExecutor
+from backend.infrastructure.neo4j_repository import Neo4jRepositoryBase
 from backend.infrastructure.redis import RedisConnection
 from backend.interfaces.deployment import DeploymentProvider
 from backend.interfaces.evidence import (
@@ -71,6 +72,8 @@ from backend.queues.redis import (
     RedisRetryQueue,
     RedisStreamClient,
 )
+from backend.retrieval.graph import GraphRetriever
+from backend.retrieval.pipeline import RetrievalPipeline
 from backend.runtime import RuntimeFactory, RuntimeRegistry
 from backend.runtime.middleware import RuntimeMiddlewarePipeline
 from backend.services.closed_loop_orchestrator import ClosedLoopOrchestrator
@@ -355,17 +358,56 @@ class ApplicationProvider(Provider):
     # ── InvestigationOrchestrator ─────────────────────────────────────────
 
     @provide(scope=Scope.APP)
+    def graph_repository(
+        self,
+        container: ApplicationContainer,
+    ) -> Neo4jRepositoryBase | None:
+        """Return a Neo4j repository for graph traversal, or None when disabled."""
+        if container.neo4j_executor is None:
+            return None
+        return Neo4jRepositoryBase(executor=container.neo4j_executor)
+
+    @provide(scope=Scope.APP)
+    def graph_retrieval_pipeline(
+        self,
+        settings: AppSettings,
+        graph_repo: Neo4jRepositoryBase | None,
+        redis_cache: RedisCache,
+    ) -> RetrievalPipeline | None:
+        """Return a graph RetrievalPipeline when GraphRAG is enabled and Neo4j is available.
+
+        Returns None when:
+        - ``feature_flags.graph_rag`` is False, or
+        - Neo4j is not enabled/connected (graph_repo is None).
+        This makes GraphRAG strictly optional; the investigation pipeline
+        falls back to evidence-only mode automatically.
+        """
+        if not settings.feature_flags.graph_rag:
+            return None
+        if graph_repo is None:
+            return None
+        retriever = GraphRetriever(repository=graph_repo, cache=redis_cache)
+        return RetrievalPipeline(provider=retriever, cache=redis_cache)
+
+    @provide(scope=Scope.APP)
     def investigation_orchestrator(
         self,
         evidence_orchestrator: EvidenceOrchestrator,
         hypothesis_engine: HypothesisEngine,
         event_publisher: RedisWorkflowEventPublisher,
+        graph_pipeline: RetrievalPipeline | None,
     ) -> InvestigationOrchestrator:
-        """Return the investigation pipeline wired to evidence + hypothesis engines."""
+        """Return the investigation pipeline wired to evidence + hypothesis engines.
+
+        When GraphRAG is enabled and Neo4j is available, ``graph_pipeline`` is
+        injected so the orchestrator enriches investigation context with graph
+        knowledge before each evidence loop.
+        """
         return InvestigationOrchestrator(
             evidence_orchestrator=evidence_orchestrator,
             hypothesis_engine=hypothesis_engine,
             event_emitter=event_publisher,
+            retrieval_pipeline=graph_pipeline,
         )
 
     # ── RemediationEngine ─────────────────────────────────────────────────

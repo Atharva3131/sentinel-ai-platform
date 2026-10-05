@@ -52,6 +52,7 @@ from backend.models.evidence import (
 )
 from backend.models.hypothesis import RootCauseAnalysis
 from backend.models.incident import Incident
+from backend.retrieval.pipeline import RetrievalPipeline
 from backend.services.evidence_normalizer import NormalizedEvidenceCollection
 from backend.services.evidence_orchestrator import (
     EvidenceOrchestrationResult,
@@ -170,6 +171,12 @@ class InvestigationOrchestrator:
       ``hypothesis_engine``      — HypothesisEngine with a HypothesisGenerator
       ``event_emitter``          — IncidentEventEmitter (optional)
       ``additional_selector``    — AdditionalEvidenceSelectorProtocol (optional)
+      ``retrieval_pipeline``     — RetrievalPipeline for GraphRAG context (optional).
+                                   When set, a graph traversal is run once before the
+                                   evidence loop and results are injected into the
+                                   ``context`` dict under the key ``"retrieval_context"``.
+                                   Guarded by the ``GRAPH_RAG`` feature flag in the DI
+                                   layer; the orchestrator itself is flag-agnostic.
       ``max_iterations``         — loop ceiling (default 3)
       ``confidence_threshold``   — minimum RCA confidence to stop iterating
       ``iteration_timeout_seconds`` — per-iteration wall-clock budget
@@ -181,6 +188,7 @@ class InvestigationOrchestrator:
     additional_selector: AdditionalEvidenceSelectorProtocol = field(
         default_factory=AdditionalEvidenceSelectorProtocol
     )
+    retrieval_pipeline: RetrievalPipeline | None = None
     max_iterations: int = _DEFAULT_MAX_ITERATIONS
     confidence_threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD
     iteration_timeout_seconds: float = _DEFAULT_ITERATION_TIMEOUT_SECONDS
@@ -230,6 +238,13 @@ class InvestigationOrchestrator:
             emitter_context,
         )
         bound_log.info("investigation_started", max_iterations=self.max_iterations)
+
+        # ── GraphRAG: enrich context with knowledge-graph evidence ────────
+        # Run once before the evidence loop.  Failures are tolerated —
+        # investigation continues with evidence-only context.
+        context = await self._enrich_context_with_graph(
+            incident, context, bound_log
+        )
 
         evidence_results: list[EvidenceOrchestrationResult] = []
         already_requested: set[EvidenceSourceKind] = set()
@@ -485,6 +500,69 @@ class InvestigationOrchestrator:
             await self.event_emitter.emit(event_name, payload, context)
         except Exception as exc:
             log.warning("event_emission_failed", event=event_name, error=str(exc))
+
+    async def _enrich_context_with_graph(
+        self,
+        incident: Incident,
+        context: dict[str, Any] | None,
+        bound_log: Any,
+    ) -> dict[str, Any] | None:
+        """Run GraphRAG retrieval and inject results into the context dict.
+
+        Does nothing when ``retrieval_pipeline`` is not set.  Failures are
+        logged at WARNING level and the original context is returned unchanged
+        so the investigation continues with evidence-only context.
+        """
+        if self.retrieval_pipeline is None:
+            return context
+
+        from backend.retrieval.context import RetrievalContext
+        from backend.retrieval.models import RetrievalStrategy
+
+        # Use the first affected service as the graph anchor.
+        anchor_id = (
+            incident.affected_services[0] if incident.affected_services else incident.incident_id
+        )
+        retrieval_ctx = RetrievalContext(
+            retrieval_id=str(uuid.uuid4()),
+            query=incident.title,
+            strategy=RetrievalStrategy.GRAPH,
+            top_k=20,
+            tenant_id=incident.tenant_id,
+            correlation_id=incident.correlation_id,
+            filters={"anchor_id": anchor_id},
+            use_cache=True,
+        )
+
+        try:
+            results, metadata = await self.retrieval_pipeline.run(retrieval_ctx)
+            graph_snippets = [r.chunk.content for r in results]
+            latency_ms = (
+                round(metadata.latency_ms, 2)
+                if metadata.latency_ms is not None
+                else None
+            )
+            bound_log.info(
+                "graph_retrieval_complete",
+                result_count=len(results),
+                latency_ms=latency_ms,
+                cached=metadata.cached,
+            )
+            enriched = dict(context or {})
+            enriched["retrieval_context"] = {
+                "graph_snippets": graph_snippets,
+                "anchor_id": anchor_id,
+                "result_count": len(results),
+                "retrieval_id": retrieval_ctx.retrieval_id,
+            }
+            return enriched
+        except Exception as exc:
+            bound_log.warning(
+                "graph_retrieval_failed",
+                error=str(exc),
+                anchor_id=anchor_id,
+            )
+            return context
 
 
 # ---------------------------------------------------------------------------

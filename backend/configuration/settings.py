@@ -86,6 +86,7 @@ class KeyVaultSettings(BaseModel):
     enabled: bool = False
     url: str | None = None
     postgres_password_secret: str = "postgres-admin-password"
+    llm_primary_api_key_secret: str = "llm-primary-api-key"
 
     @model_validator(mode="after")
     def validate_enabled(self) -> Self:
