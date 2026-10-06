@@ -36,10 +36,14 @@ def create_redis_client(
             },
         )
 
+        redis_url = (
+            f"rediss://{settings.host}:{settings.port}/{settings.database}"
+        )
+
         return cast(
             Redis,
             Redis.from_url(
-                settings.redis_url,
+                redis_url,
                 credential_provider=credential_provider,
                 decode_responses=True,
                 socket_timeout=settings.socket_timeout_seconds,
