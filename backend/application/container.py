@@ -129,6 +129,10 @@ class ApplicationContainer:
                 settings.blob.enabled
                 and settings.blob.connection_string is None
             )
+            or (
+                settings.redis.ssl
+                and settings.redis.username is not None
+            )
         )
 
         if needs_azure_credential:
@@ -177,8 +181,11 @@ class ApplicationContainer:
             engine=engine,
             session_factory=session_factory,
         )
+        redis_client = create_redis_client(
+            settings.redis,
+            managed_identity_client_id=settings.azure.managed_identity_client_id,
+        )
 
-        redis_client = create_redis_client(settings.redis)
         redis_connection = RedisConnection(redis_client)
         redis_cache = RedisCache(redis_connection)
         redis_streams = RedisStreamClient(redis_connection)

@@ -34,7 +34,9 @@ class HealthService:
 
     async def readiness(self) -> ReadinessReport:
         """Return readiness only when every configured dependency is healthy."""
-        results = await asyncio.gather(*(self._run_check(check) for check in self._checks))
+        results = await asyncio.gather(
+            *(self._run_check(check) for check in self._checks)
+        )
         return ReadinessReport(
             ready=all(result.status is HealthStatus.UP for result in results),
             checks=tuple(results),
@@ -42,17 +44,31 @@ class HealthService:
 
     async def _run_check(self, check: HealthCheck) -> HealthCheckResult:
         started = time.perf_counter()
+
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 await check.check()
+
         except TimeoutError:
-            result = self._result(check.name, HealthStatus.DOWN, started, "timeout")
+            result = self._result(
+                check.name,
+                HealthStatus.DOWN,
+                started,
+                "timeout",
+            )
             self._record(result)
             return result
+
         except Exception as exc:  # Dependency failures are normalized at this boundary.
-            result = self._result(check.name, HealthStatus.DOWN, started, type(exc).__name__)
+            result = self._result(
+                check.name,
+                HealthStatus.DOWN,
+                started,
+                f"{type(exc).__name__}: {exc}",
+            )
             self._record(result)
             return result
+
         result = self._result(check.name, HealthStatus.UP, started)
         self._record(result)
         return result
@@ -75,6 +91,7 @@ class HealthService:
     def _record(self, result: HealthCheckResult) -> None:
         if self._telemetry is None:
             return
+
         self._telemetry.record_health_check(
             name=result.name,
             status=result.status.value,
