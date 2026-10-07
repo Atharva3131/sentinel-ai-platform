@@ -20,6 +20,9 @@ from backend.interfaces.fake_evidence import (
     FakeMetricsProvider,
     FakeTracesProvider,
 )
+from backend.providers.evidence.azure_monitor import (
+    AzureMonitorMetricsProvider,
+)
 from backend.providers.evidence.logs import ElasticLogsProvider
 from backend.providers.evidence.metrics import PrometheusMetricsProvider
 from backend.providers.evidence.traces import OTLPTracesProvider
@@ -32,6 +35,8 @@ def build_metrics_provider(settings: EvidenceSettings) -> MetricsEvidenceProvide
         return FakeMetricsProvider()
     if cfg.name == EvidenceProviderName.PROMETHEUS:
         return PrometheusMetricsProvider.from_settings(cfg)
+    if cfg.name == EvidenceProviderName.AZURE_MONITOR:
+        return AzureMonitorMetricsProvider.from_settings(cfg)
     raise ValueError(f"Unknown metrics provider: {cfg.name!r}")
 
 

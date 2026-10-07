@@ -334,6 +334,7 @@ class EvidenceProviderName(StrEnum):
     PROMETHEUS = "prometheus"
     ELASTIC = "elastic"
     OTLP = "otlp"          # Jaeger-compatible OTLP HTTP
+    AZURE_MONITOR = "azure_monitor"
     FAKE = "fake"
 
 
