@@ -439,9 +439,18 @@ class ClosedLoopOrchestrator:
                 error_type=type(exc).__name__,
             )
             
-            # Attempt to persist ESCALATED status (cannot auto-resolve due to error)
+            # Persist error details to incident metadata before escalating
+            error_metadata = incident.metadata.copy() if incident.metadata else {}
+            error_metadata["closed_loop_error"] = str(exc)
+            error_metadata["closed_loop_error_type"] = type(exc).__name__
+            
+            # Update incident with error metadata and ESCALATED status
+            updated_incident = incident.with_status(IncidentStatus.ESCALATED)
+            from dataclasses import replace as dc_replace_incident
+            updated_incident = dc_replace_incident(updated_incident, metadata=error_metadata)
+            
             try:
-                await self._update_status(incident, IncidentStatus.ESCALATED)
+                await self.repository.save(updated_incident)
             except Exception as status_exc:
                 bound_log.exception(
                     "closed_loop_escalated_status_persistence_failed",

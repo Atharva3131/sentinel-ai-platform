@@ -1308,3 +1308,51 @@ async def test_closed_loop_run_never_raises() -> None:
         assert isinstance(result, ClosedLoopResult)
         assert result.status == "failed"
         assert result.incident_id == inc.incident_id
+
+
+# ── 26. Exception details are persisted to incident metadata ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_persists_error_metadata() -> None:
+    """Verify exception details are saved to incident metadata."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="exc-metadata-test")
+
+    class FailingInvestigation:
+        """Investigation that raises an exception with specific message."""
+        async def investigate(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Database connection timeout")
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=FailingInvestigation(),  # type: ignore[arg-type]
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-metadata-test")
+
+    # Verify result indicates failure
+    assert result.status == "failed"
+
+    # Verify incident was persisted with error metadata
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+    
+    # Verify error metadata fields are present
+    assert "closed_loop_error" in saved.metadata
+    assert "closed_loop_error_type" in saved.metadata
+    
+    # Verify error details match the exception
+    assert saved.metadata["closed_loop_error"] == "Database connection timeout"
+    assert saved.metadata["closed_loop_error_type"] == "RuntimeError"
