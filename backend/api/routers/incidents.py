@@ -1,23 +1,3 @@
-"""Incident ingestion and retrieval API endpoints.
-
-Routes:
-    POST   /api/v1/incidents          — ingest a new incident
-    GET    /api/v1/incidents/{id}     — retrieve a single incident
-    GET    /api/v1/incidents          — list incidents (filterable, paginated)
-
-Design:
-  * No business logic lives here — the router delegates entirely to
-    IncidentIngestionService and PostgreSQLIncidentRepository.
-  * Lifecycle events are emitted by the ingestion service, not the router.
-  * Dependency injection is provided by Dishka via FromDishka[T] annotations.
-  * The router converts domain objects to response schemas at the boundary.
-  * HTTP 422 is returned by FastAPI/Pydantic for validation errors automatically.
-  * After successful ingestion of a NEW incident, the ClosedLoopOrchestrator
-    is invoked inline.  The incident is already persisted at that point, so
-    orchestration failures cannot lose data — they are logged and the 201
-    response is returned regardless.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -56,6 +36,7 @@ from backend.services.incident_ingestion import (
 
 log = structlog.get_logger(__name__)
 
+
 router = APIRouter(
     prefix="/incidents",
     tags=["incidents"],
@@ -93,32 +74,45 @@ async def create_incident(
 
     When the request carries a ``correlation_id`` that matches an already-open
     incident, the existing incident is returned with ``is_duplicate=True`` and
-    HTTP 200 instead of 201.  The caller may inspect ``existing_incident_id``
+    HTTP 200 instead of 201. The caller may inspect ``existing_incident_id``
     to retrieve the original.
 
     For new incidents, after persistence the ClosedLoopOrchestrator is invoked
     inline to drive the investigation → remediation → deployment → verification
-    lifecycle.  Orchestration failures are logged but do not affect the 201
+    lifecycle. Orchestration failures are logged but do not affect the 201
     response — the incident is already safely persisted.
     """
     incident = _request_to_domain(body)
-    bound_log = log.bind(incident_id=incident.incident_id, correlation_id=incident.correlation_id)
+
+    bound_log = log.bind(
+        incident_id=incident.incident_id,
+        correlation_id=incident.correlation_id,
+    )
 
     try:
         result = await ingestion_service.ingest(incident)
+
     except IncidentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
+
     except IncidentPersistenceError as exc:
-        bound_log.error("incident_persistence_failed", error=str(exc))
+        bound_log.error(
+            "incident_persistence_failed",
+            error=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist incident",
         ) from exc
+
     except Exception as exc:
-        bound_log.error("incident_ingestion_unexpected_error", error=str(exc))
+        bound_log.error(
+            "incident_ingestion_unexpected_error",
+            error=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unexpected error during incident ingestion",
@@ -137,11 +131,18 @@ async def create_incident(
     if not result.is_duplicate:
         try:
             await closed_loop_orchestrator.run(result.incident)
+
         except Exception as exc:
             # The incident is persisted — log the failure and return 201.
-            bound_log.error(
+            #
+            # IMPORTANT:
+            # Use exception() rather than error() so the full traceback is
+            # emitted. This lets us identify the actual closed-loop failure
+            # in production.
+            bound_log.exception(
                 "closed_loop_orchestration_failed",
                 error=str(exc),
+                error_type=type(exc).__name__,
                 incident_id=result.incident.incident_id,
             )
 
@@ -177,8 +178,13 @@ async def get_incident(
     """Return the incident identified by *incident_id*."""
     try:
         incident = await repository.get(incident_id)
+
     except IncidentPersistenceError as exc:
-        log.error("incident_get_failed", incident_id=incident_id, error=str(exc))
+        log.error(
+            "incident_get_failed",
+            incident_id=incident_id,
+            error=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve incident",
@@ -189,6 +195,7 @@ async def get_incident(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Incident '{incident_id}' not found",
         )
+
     return _domain_to_response(incident)
 
 
@@ -223,8 +230,12 @@ async def list_incidents(
             status=status_filter,
             severity=severity_filter,
         )
+
     except IncidentPersistenceError as exc:
-        log.error("incident_list_failed", error=str(exc))
+        log.error(
+            "incident_list_failed",
+            error=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list incidents",
@@ -244,9 +255,11 @@ async def list_incidents(
 
 
 def _request_to_domain(body: CreateIncidentRequest) -> Incident:
-    """Convert a validated API request body to a domain Incident."""
+    """Convert a validated API request to a domain Incident."""
     incident_id = body.incident_id or str(uuid.uuid4())
+
     detected_at = body.detected_at or datetime.now(UTC)
+
     # Ensure timezone-aware
     if detected_at.tzinfo is None:
         detected_at = detected_at.replace(tzinfo=UTC)
@@ -259,9 +272,11 @@ def _request_to_domain(body: CreateIncidentRequest) -> Incident:
             title=s.title,
             description=s.description,
             severity=IncidentSeverity(s.severity),
-            received_at=s.received_at
-            if s.received_at.tzinfo is not None
-            else s.received_at.replace(tzinfo=UTC),
+            received_at=(
+                s.received_at
+                if s.received_at.tzinfo is not None
+                else s.received_at.replace(tzinfo=UTC)
+            ),
             service=s.service,
             environment=s.environment,
             raw_payload=s.raw_payload,
