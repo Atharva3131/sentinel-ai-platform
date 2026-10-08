@@ -1022,3 +1022,75 @@ async def test_end_to_end_pr_validation_to_deployment_success() -> None:
         DeploymentState.SUCCEEDED,
         DeploymentState.TRIGGERED,  # if provider skipped polling
     )
+
+
+
+# ── RemediationSettings auto-approval configuration ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_remediation_policy_high_risk_auto_approve_disabled_by_default() -> None:
+    """Verify HIGH-risk actions require approval when auto_approve_high_risk=False (default)."""
+    from backend.configuration.settings import RemediationSettings
+    from backend.models.remediation import ActionRiskLevel, RemediationAction, RemediationActionType
+    
+    # Default: auto_approve_high_risk = False
+    settings = RemediationSettings()
+    assert settings.auto_approve_high_risk is False
+    
+    # Create policy engine with default auto-approve levels
+    auto_approve_levels = {ActionRiskLevel.LOW, ActionRiskLevel.MEDIUM}
+    policy = ActionPolicy(auto_approve_risk_levels=frozenset(auto_approve_levels))
+    engine = RemediationPolicyEngine(policy=policy)
+    
+    inc = _incident()
+    action = RemediationAction(
+        action_id=str(uuid.uuid4()),
+        action_type=RemediationActionType.RESTART_SERVICE,
+        target_service="api-gateway",
+        target_environment="staging",
+        risk_level=ActionRiskLevel.HIGH,
+        title="Restart API Gateway",
+        description="Emergency restart",
+        parameters={},
+        timeout_seconds=30.0,
+    )
+    
+    # HIGH risk should be rejected
+    result = await engine.evaluate(action, inc)
+    assert result["allowed"] is False
+    assert "approval" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_remediation_policy_high_risk_auto_approve_enabled() -> None:
+    """Verify HIGH-risk actions are auto-approved when auto_approve_high_risk=True."""
+    from backend.configuration.settings import RemediationSettings
+    from backend.models.remediation import ActionRiskLevel, RemediationAction, RemediationActionType
+    
+    # Enabled: auto_approve_high_risk = True
+    settings = RemediationSettings(auto_approve_high_risk=True)
+    assert settings.auto_approve_high_risk is True
+    
+    # Create policy engine with HIGH-risk auto-approval
+    auto_approve_levels = {ActionRiskLevel.LOW, ActionRiskLevel.MEDIUM, ActionRiskLevel.HIGH}
+    policy = ActionPolicy(auto_approve_risk_levels=frozenset(auto_approve_levels))
+    engine = RemediationPolicyEngine(policy=policy)
+    
+    inc = _incident()
+    action = RemediationAction(
+        action_id=str(uuid.uuid4()),
+        action_type=RemediationActionType.RESTART_SERVICE,
+        target_service="api-gateway",
+        target_environment="staging",
+        risk_level=ActionRiskLevel.HIGH,
+        title="Restart API Gateway",
+        description="Emergency restart",
+        parameters={},
+        timeout_seconds=30.0,
+    )
+    
+    # HIGH risk should be approved
+    result = await engine.evaluate(action, inc)
+    assert result["allowed"] is True
+    assert "permitted" in result["reason"]

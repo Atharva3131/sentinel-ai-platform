@@ -1356,3 +1356,148 @@ async def test_closed_loop_persists_error_metadata() -> None:
     # Verify error details match the exception
     assert saved.metadata["closed_loop_error"] == "Database connection timeout"
     assert saved.metadata["closed_loop_error_type"] == "RuntimeError"
+
+
+# ── 27. Event emission failure does not crash orchestrator ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_survives_event_emission_failure() -> None:
+    """Verify run() survives event emission failures without raising."""
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="exc-event-fail")
+
+    class FailingEventEmitter:
+        """Mock emitter that raises an exception."""
+        async def emit(self, event_name: str, payload: Any, context: Any) -> None:
+            raise RuntimeError("Event system unavailable")
+
+    coordinator = _make_verification_coordinator(emitter=_EventCollector())
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(emitter=_EventCollector()),
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=FailingEventEmitter(),
+        max_reinvestigation_cycles=3,
+    )
+
+    # Must NOT raise even though event_emitter.emit() fails
+    result = await orchestrator.run(inc, execution_id="exec-event-fail")
+
+    # Should complete normally and return a result
+    assert result is not None
+    assert isinstance(result, ClosedLoopResult)
+
+
+# ── 28. Remediation failure persists ESCALATED status ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_remediation_failure_persists_status() -> None:
+    """Verify remediation failure persists IncidentStatus.ESCALATED to database."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="remediation-fail-test")
+
+    class FailingRemediationPlanner:
+        """Planner that raises an exception."""
+        async def __call__(self, incident: Any, rca: Any) -> Any:
+            raise RuntimeError("Planner connection failed")
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(emitter=emitter),
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=FailingRemediationPlanner(),
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-remediation-fail")
+
+    # Verify result indicates failure
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "Remediation failed" in result.failure_reason
+
+    # Verify incident was persisted with ESCALATED status and error metadata
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+    assert "closed_loop_failure_stage" in saved.metadata
+    assert saved.metadata["closed_loop_failure_stage"] == "remediation"
+    assert "closed_loop_failure_reason" in saved.metadata
+    assert result.failure_reason is not None
+    assert "Planner connection failed" in saved.metadata["closed_loop_failure_reason"]
+
+
+# ── 29. Deployment failure persists ESCALATED status ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_deployment_failure_persists_status() -> None:
+    """Verify deployment failure persists IncidentStatus.ESCALATED to database."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="deployment-fail-test")
+
+    class FailingDeploymentPipeline:
+        """Pipeline that returns failed DeploymentResult."""
+        async def deploy(self, request: Any, incident: Any, **kwargs: Any) -> Any:
+            from backend.models.deployment import (
+                DeploymentResult,
+                DeploymentState,
+                DeploymentStatus,
+            )
+            return DeploymentResult(
+                request=request,
+                status=DeploymentStatus(
+                    deployment_id=request.deployment_id,
+                    run_id=None,
+                    state=DeploymentState.FAILED,
+                    environment=request.environment,
+                ),
+                error="GitHub API rate limit exceeded",
+                total_duration_ms=100.0,
+            )
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = FailingDeploymentPipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(emitter=emitter),
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,  # type: ignore[arg-type]
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-deployment-fail")
+
+    # Verify result indicates failure
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "Deployment failed" in result.failure_reason
+
+    # Verify incident was persisted with ESCALATED status and error metadata
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+    assert "closed_loop_failure_stage" in saved.metadata
+    assert saved.metadata["closed_loop_failure_stage"] == "deployment"
+    assert "closed_loop_failure_reason" in saved.metadata
+    assert result.failure_reason is not None
+    assert "rate limit" in saved.metadata["closed_loop_failure_reason"]

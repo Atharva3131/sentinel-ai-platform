@@ -217,7 +217,7 @@ class DeploymentPipeline:
         try:
             await self.event_emitter.emit(event_name, payload, None)
         except Exception as exc:
-            log.warning("deployment_event_emission_failed", event=event_name, error=str(exc))
+            log.warning("deployment_event_emission_failed", event_name=event_name, error=str(exc))
 
 
 # ---------------------------------------------------------------------------

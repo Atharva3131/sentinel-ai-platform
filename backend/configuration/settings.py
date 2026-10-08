@@ -300,6 +300,26 @@ class DeploymentSettings(BaseModel):
     retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
 
 
+class RemediationSettings(BaseModel):
+    """Remediation policy and execution configuration.
+
+    Controls whether HIGH-risk actions are auto-approved without human review.
+    Default behavior requires approval for HIGH-risk actions.
+
+    Environment variable examples::
+
+        SENTINEL_REMEDIATION__AUTO_APPROVE_HIGH_RISK=false
+    """
+
+    auto_approve_high_risk: bool = Field(
+        default=False,
+        description=(
+            "Auto-approve HIGH-risk remediation actions without human approval "
+            "(demo/autonomous mode)"
+        ),
+    )
+
+
 class GitHubSettings(BaseModel):
     """GitHub API configuration for the remediation integration.
 
@@ -461,6 +481,7 @@ class AppSettings(BaseSettings):
     evidence: EvidenceSettings = Field(default_factory=EvidenceSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     deployment: DeploymentSettings = Field(default_factory=DeploymentSettings)
+    remediation: RemediationSettings = Field(default_factory=RemediationSettings)
     azure_monitor_metrics: AzureMonitorMetricsSettings = Field(
         default_factory=AzureMonitorMetricsSettings
     )

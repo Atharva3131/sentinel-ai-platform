@@ -344,9 +344,26 @@ class ApplicationProvider(Provider):
     # ── Policy engine ─────────────────────────────────────────────────────
 
     @provide(scope=Scope.APP)
-    def remediation_policy_engine(self) -> RemediationPolicyEngine:
-        """Return a default-policy RemediationPolicyEngine (PolicyGateway port)."""
-        return RemediationPolicyEngine()
+    def remediation_policy_engine(self, settings: AppSettings) -> RemediationPolicyEngine:
+        """Return a RemediationPolicyEngine with optionally auto-approved HIGH-risk actions.
+        
+        When settings.remediation.auto_approve_high_risk is True, HIGH-risk actions
+        are auto-approved without human review (demo/autonomous mode).
+        """
+        from backend.models.remediation import ActionRiskLevel
+        from backend.policies.action_policy import ActionPolicy
+        
+        # Build auto-approve levels based on configuration
+        auto_approve_levels = {ActionRiskLevel.LOW, ActionRiskLevel.MEDIUM}
+        if settings.remediation.auto_approve_high_risk:
+            auto_approve_levels.add(ActionRiskLevel.HIGH)
+        
+        # Create policy with appropriate risk approval levels
+        policy = ActionPolicy(
+            auto_approve_risk_levels=frozenset(auto_approve_levels)
+        )
+        
+        return RemediationPolicyEngine(policy=policy)
 
     # ── Hypothesis engine ─────────────────────────────────────────────────
 

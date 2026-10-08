@@ -224,4 +224,4 @@ class IncidentIngestionService:
         try:
             await self.event_emitter.emit(event_name, payload, context)
         except Exception as exc:
-            log.warning("event_emission_failed", event=event_name, error=str(exc))
+            log.warning("event_emission_failed", event_name=event_name, error=str(exc))

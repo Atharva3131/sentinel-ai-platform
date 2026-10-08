@@ -295,7 +295,26 @@ class ClosedLoopOrchestrator:
                         )
                     except Exception as exc:
                         bound_log.error("remediation_failed", cycle=cycle, error=str(exc))
-                        return _failed(f"Remediation failed on cycle {cycle}: {exc}")
+                        failure_reason = f"Remediation failed on cycle {cycle}: {exc}"
+                        
+                        # Persist error metadata and ESCALATED status before returning
+                        error_metadata = incident.metadata.copy() if incident.metadata else {}
+                        error_metadata["closed_loop_failure_stage"] = "remediation"
+                        error_metadata["closed_loop_failure_reason"] = str(exc)
+                        
+                        updated_incident = incident.with_status(IncidentStatus.ESCALATED)
+                        from dataclasses import replace as dc_replace
+                        updated_incident = dc_replace(updated_incident, metadata=error_metadata)
+                        
+                        try:
+                            await self.repository.save(updated_incident)
+                        except Exception as status_exc:
+                            bound_log.exception(
+                                "remediation_failure_status_persistence_failed",
+                                status_error=str(status_exc),
+                            )
+                        
+                        return _failed(failure_reason)
 
                 # ── Deployment ────────────────────────────────────────────────
                 deploy_req = build_deployment_request(
@@ -341,9 +360,26 @@ class ClosedLoopOrchestrator:
                             "error": last_deployment.error,
                         },
                     )
-                    return _failed(
-                        f"Deployment failed on cycle {cycle}: {last_deployment.error}"
-                    )
+                    failure_reason = f"Deployment failed on cycle {cycle}: {last_deployment.error}"
+                    
+                    # Persist error metadata and ESCALATED status before returning
+                    error_metadata = incident.metadata.copy() if incident.metadata else {}
+                    error_metadata["closed_loop_failure_stage"] = "deployment"
+                    error_metadata["closed_loop_failure_reason"] = last_deployment.error or ""
+                    
+                    updated_incident = incident.with_status(IncidentStatus.ESCALATED)
+                    from dataclasses import replace as dc_replace
+                    updated_incident = dc_replace(updated_incident, metadata=error_metadata)
+                    
+                    try:
+                        await self.repository.save(updated_incident)
+                    except Exception as status_exc:
+                        bound_log.exception(
+                            "deployment_failure_status_persistence_failed",
+                            status_error=str(status_exc),
+                        )
+                    
+                    return _failed(failure_reason)
 
                 # ── Verification ──────────────────────────────────────────────
                 ver_plan = (
@@ -540,7 +576,7 @@ class ClosedLoopOrchestrator:
         try:
             await self.event_emitter.emit(event_name, payload, None)
         except Exception as exc:
-            log.warning("closed_loop_event_failed", event=event_name, error=str(exc))
+            log.warning("closed_loop_event_failed", event_name=event_name, error=str(exc))
 
 
 # ---------------------------------------------------------------------------
