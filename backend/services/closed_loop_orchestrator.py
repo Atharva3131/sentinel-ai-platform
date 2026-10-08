@@ -166,269 +166,300 @@ class ClosedLoopOrchestrator:
             incident_id=incident.incident_id,
             execution_id=execution_id,
         )
-        bound_log.info(
-            "closed_loop_started",
-            max_cycles=self.max_reinvestigation_cycles,
-        )
 
-        last_outcome: VerificationOutcome | None = None
-        last_deployment: DeploymentResult | None = None
-
-        def _duration() -> float:
-            return (time.monotonic() - t0) * 1000
-
-        def _resolved(resolution: IncidentResolution) -> ClosedLoopResult:
-            return ClosedLoopResult(
-                incident_id=incident.incident_id,
-                execution_id=execution_id,
-                status="resolved",
-                cycles=cycle,
-                last_outcome=last_outcome,
-                deployment_result=last_deployment,
-                resolution=resolution,
-                duration_ms=_duration(),
+        try:
+            bound_log.info(
+                "closed_loop_started",
+                max_cycles=self.max_reinvestigation_cycles,
             )
 
-        def _escalated(reason: str) -> ClosedLoopResult:
-            return ClosedLoopResult(
-                incident_id=incident.incident_id,
-                execution_id=execution_id,
-                status="escalated",
-                cycles=cycle,
-                last_outcome=last_outcome,
-                deployment_result=last_deployment,
-                resolution=None,
-                duration_ms=_duration(),
-                failure_reason=reason,
-            )
+            last_outcome: VerificationOutcome | None = None
+            last_deployment: DeploymentResult | None = None
 
-        def _failed(reason: str) -> ClosedLoopResult:
-            return ClosedLoopResult(
-                incident_id=incident.incident_id,
-                execution_id=execution_id,
-                status="failed",
-                cycles=cycle,
-                last_outcome=last_outcome,
-                deployment_result=last_deployment,
-                resolution=None,
-                duration_ms=_duration(),
-                failure_reason=reason,
-            )
+            def _duration() -> float:
+                return (time.monotonic() - t0) * 1000
 
-        # ── Idempotency: check if already resolved ────────────────────────
-        existing = await self.repository.get(incident.incident_id)
-        if existing is not None and existing.status == IncidentStatus.RESOLVED:
-            bound_log.info("closed_loop_already_resolved")
-            return ClosedLoopResult(
-                incident_id=incident.incident_id,
-                execution_id=execution_id,
-                status="resolved",
-                cycles=0,
-                last_outcome=None,
-                deployment_result=None,
-                resolution=None,
-                duration_ms=_duration(),
-            )
-
-        for cycle in range(1, self.max_reinvestigation_cycles + 1):
-            # ── Cancellation check ────────────────────────────────────────
-            if cancellation_check is not None and cancellation_check():
-                bound_log.warning("closed_loop_cancelled", cycle=cycle)
+            def _resolved(resolution: IncidentResolution) -> ClosedLoopResult:
                 return ClosedLoopResult(
                     incident_id=incident.incident_id,
                     execution_id=execution_id,
-                    status="cancelled",
+                    status="resolved",
+                    cycles=cycle,
+                    last_outcome=last_outcome,
+                    deployment_result=last_deployment,
+                    resolution=resolution,
+                    duration_ms=_duration(),
+                )
+
+            def _escalated(reason: str) -> ClosedLoopResult:
+                return ClosedLoopResult(
+                    incident_id=incident.incident_id,
+                    execution_id=execution_id,
+                    status="escalated",
                     cycles=cycle,
                     last_outcome=last_outcome,
                     deployment_result=last_deployment,
                     resolution=None,
                     duration_ms=_duration(),
+                    failure_reason=reason,
                 )
 
-            cycle_exec_id = f"{execution_id}-c{cycle}"
-            bound_log.info("closed_loop_cycle_started", cycle=cycle)
+            def _failed(reason: str) -> ClosedLoopResult:
+                return ClosedLoopResult(
+                    incident_id=incident.incident_id,
+                    execution_id=execution_id,
+                    status="failed",
+                    cycles=cycle,
+                    last_outcome=last_outcome,
+                    deployment_result=last_deployment,
+                    resolution=None,
+                    duration_ms=_duration(),
+                    failure_reason=reason,
+                )
 
-            # ── Reinvestigation event (cycle > 1) ─────────────────────────
-            if cycle > 1:
+            # ── Idempotency: check if already resolved ────────────────────────
+            existing = await self.repository.get(incident.incident_id)
+            if existing is not None and existing.status == IncidentStatus.RESOLVED:
+                bound_log.info("closed_loop_already_resolved")
+                return ClosedLoopResult(
+                    incident_id=incident.incident_id,
+                    execution_id=execution_id,
+                    status="resolved",
+                    cycles=0,
+                    last_outcome=None,
+                    deployment_result=None,
+                    resolution=None,
+                    duration_ms=_duration(),
+                )
+
+            for cycle in range(1, self.max_reinvestigation_cycles + 1):
+                # ── Cancellation check ────────────────────────────────────────
+                if cancellation_check is not None and cancellation_check():
+                    bound_log.warning("closed_loop_cancelled", cycle=cycle)
+                    return ClosedLoopResult(
+                        incident_id=incident.incident_id,
+                        execution_id=execution_id,
+                        status="cancelled",
+                        cycles=cycle,
+                        last_outcome=last_outcome,
+                        deployment_result=last_deployment,
+                        resolution=None,
+                        duration_ms=_duration(),
+                    )
+
+                cycle_exec_id = f"{execution_id}-c{cycle}"
+                bound_log.info("closed_loop_cycle_started", cycle=cycle)
+
+                # ── Reinvestigation event (cycle > 1) ─────────────────────────
+                if cycle > 1:
+                    await self._emit(
+                        REINVESTIGATION_STARTED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "execution_id": execution_id,
+                            "cycle": cycle,
+                            "max_cycles": self.max_reinvestigation_cycles,
+                        },
+                    )
+
+                # ── Investigation ─────────────────────────────────────────────
+                investigation_result = await self.investigation.investigate(
+                    incident,
+                    execution_id=cycle_exec_id,
+                    context=context,
+                    cancellation_check=cancellation_check,
+                )
+
+                if investigation_result.cancelled:
+                    return ClosedLoopResult(
+                        incident_id=incident.incident_id,
+                        execution_id=execution_id,
+                        status="cancelled",
+                        cycles=cycle,
+                        last_outcome=last_outcome,
+                        deployment_result=last_deployment,
+                        resolution=None,
+                        duration_ms=_duration(),
+                    )
+
+                rca = investigation_result.rca
+
+                # ── Remediation (if planner and engine are wired) ─────────────
+                if self.remediation_planner is not None:
+                    try:
+                        plan = await self.remediation_planner(incident, rca)
+                        await self.remediation_engine.execute_plan(
+                            plan, incident,
+                            correlation_id=incident.correlation_id,
+                            context=context,
+                        )
+                    except Exception as exc:
+                        bound_log.error("remediation_failed", cycle=cycle, error=str(exc))
+                        return _failed(f"Remediation failed on cycle {cycle}: {exc}")
+
+                # ── Deployment ────────────────────────────────────────────────
+                deploy_req = build_deployment_request(
+                    owner=self.deployment_owner,
+                    repository=self.deployment_repo,
+                    workflow_id=self.deployment_workflow,
+                    ref=context.get("ref", "main") if context else "main",
+                    environment=self.deployment_environment,
+                    incident_id=incident.incident_id,
+                    correlation_id=incident.correlation_id,
+                    deployment_id=(
+                        f"deploy-{incident.incident_id[:8]}-c{cycle}"
+                    ),
+                )
+                # Override idempotency_key per cycle to allow retry
+                from dataclasses import replace as dc_replace
+                deploy_req = dc_replace(
+                    deploy_req,
+                    idempotency_key=(
+                        f"cl-{incident.incident_id}-{self.deployment_environment}-c{cycle}"
+                    ),
+                )
+
+                last_deployment = await self.deployment_pipeline.deploy(
+                    deploy_req, incident,
+                    cancellation_check=cancellation_check,
+                    context=context,
+                )
+
+                if not last_deployment.succeeded:
+                    bound_log.warning(
+                        "closed_loop_deployment_failed",
+                        cycle=cycle,
+                        error=last_deployment.error,
+                    )
+                    await self._emit(
+                        INCIDENT_FAILED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "execution_id": execution_id,
+                            "phase": "deployment",
+                            "cycle": cycle,
+                            "error": last_deployment.error,
+                        },
+                    )
+                    return _failed(
+                        f"Deployment failed on cycle {cycle}: {last_deployment.error}"
+                    )
+
+                # ── Verification ──────────────────────────────────────────────
+                ver_plan = (
+                    await self.verification_planner_factory(incident, cycle)
+                    if self.verification_planner_factory
+                    else _default_verification_plan(incident)
+                )
+
+                last_outcome = await self.verification.verify(
+                    incident,
+                    ver_plan,
+                    last_deployment,
+                    execution_id=cycle_exec_id,
+                    cancellation_check=cancellation_check,
+                    context=context,
+                )
+
+                if last_outcome.state == VerificationState.CANCELLED:
+                    return ClosedLoopResult(
+                        incident_id=incident.incident_id,
+                        execution_id=execution_id,
+                        status="cancelled",
+                        cycles=cycle,
+                        last_outcome=last_outcome,
+                        deployment_result=last_deployment,
+                        resolution=None,
+                        duration_ms=_duration(),
+                    )
+
+                # ── PASS → resolve ────────────────────────────────────────────
+                if last_outcome.passed:
+                    resolution = await self._resolve(
+                        incident, execution_id, cycle, last_outcome, _duration()
+                    )
+                    bound_log.info(
+                        "closed_loop_resolved",
+                        cycle=cycle,
+                        duration_ms=round(_duration(), 2),
+                    )
+                    return _resolved(resolution)
+
+                # ── FAIL → prepare next reinvestigation cycle ─────────────────
+                bound_log.warning(
+                    "closed_loop_verification_failed",
+                    cycle=cycle,
+                    reason=last_outcome.failure_reason,
+                )
                 await self._emit(
-                    REINVESTIGATION_STARTED,
+                    INCIDENT_REINVESTIGATION_REQUIRED,
                     {
                         "incident_id": incident.incident_id,
                         "execution_id": execution_id,
                         "cycle": cycle,
+                        "reason": last_outcome.failure_reason,
                         "max_cycles": self.max_reinvestigation_cycles,
                     },
                 )
 
-            # ── Investigation ─────────────────────────────────────────────
-            investigation_result = await self.investigation.investigate(
-                incident,
-                execution_id=cycle_exec_id,
-                context=context,
-                cancellation_check=cancellation_check,
-            )
-
-            if investigation_result.cancelled:
-                return ClosedLoopResult(
-                    incident_id=incident.incident_id,
-                    execution_id=execution_id,
-                    status="cancelled",
-                    cycles=cycle,
-                    last_outcome=last_outcome,
-                    deployment_result=last_deployment,
-                    resolution=None,
-                    duration_ms=_duration(),
-                )
-
-            rca = investigation_result.rca
-
-            # ── Remediation (if planner and engine are wired) ─────────────
-            if self.remediation_planner is not None:
-                try:
-                    plan = await self.remediation_planner(incident, rca)
-                    await self.remediation_engine.execute_plan(
-                        plan, incident,
-                        correlation_id=incident.correlation_id,
-                        context=context,
+                if cycle >= self.max_reinvestigation_cycles:
+                    bound_log.error(
+                        "closed_loop_max_cycles_reached",
+                        cycles=cycle,
                     )
-                except Exception as exc:
-                    bound_log.error("remediation_failed", cycle=cycle, error=str(exc))
-                    return _failed(f"Remediation failed on cycle {cycle}: {exc}")
+                    await self._emit(
+                        REINVESTIGATION_LIMIT_REACHED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "execution_id": execution_id,
+                            "cycles": cycle,
+                        },
+                    )
+                    await self._emit(
+                        INCIDENT_ESCALATED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "execution_id": execution_id,
+                            "reason": "max_reinvestigation_cycles_reached",
+                        },
+                    )
+                    await self._update_status(incident, IncidentStatus.ESCALATED)
+                    return _escalated(
+                        f"Max reinvestigation cycles ({self.max_reinvestigation_cycles}) reached"
+                        f" without verification passing."
+                    )
 
-            # ── Deployment ────────────────────────────────────────────────
-            deploy_req = build_deployment_request(
-                owner=self.deployment_owner,
-                repository=self.deployment_repo,
-                workflow_id=self.deployment_workflow,
-                ref=context.get("ref", "main") if context else "main",
-                environment=self.deployment_environment,
-                incident_id=incident.incident_id,
-                correlation_id=incident.correlation_id,
-                deployment_id=(
-                    f"deploy-{incident.incident_id[:8]}-c{cycle}"
-                ),
+            # Should not reach here; belt-and-suspenders
+            return _escalated("Loop exited without resolution.")
+
+        except Exception as exc:
+            bound_log.exception(
+                "closed_loop_orchestration_unexpected_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
-            # Override idempotency_key per cycle to allow retry
-            from dataclasses import replace as dc_replace
-            deploy_req = dc_replace(
-                deploy_req,
-                idempotency_key=(
-                    f"cl-{incident.incident_id}-{self.deployment_environment}-c{cycle}"
-                ),
-            )
-
-            last_deployment = await self.deployment_pipeline.deploy(
-                deploy_req, incident,
-                cancellation_check=cancellation_check,
-                context=context,
-            )
-
-            if not last_deployment.succeeded:
-                bound_log.warning(
-                    "closed_loop_deployment_failed",
-                    cycle=cycle,
-                    error=last_deployment.error,
-                )
-                await self._emit(
-                    INCIDENT_FAILED,
-                    {
-                        "incident_id": incident.incident_id,
-                        "execution_id": execution_id,
-                        "phase": "deployment",
-                        "cycle": cycle,
-                        "error": last_deployment.error,
-                    },
-                )
-                return _failed(
-                    f"Deployment failed on cycle {cycle}: {last_deployment.error}"
-                )
-
-            # ── Verification ──────────────────────────────────────────────
-            ver_plan = (
-                await self.verification_planner_factory(incident, cycle)
-                if self.verification_planner_factory
-                else _default_verification_plan(incident)
-            )
-
-            last_outcome = await self.verification.verify(
-                incident,
-                ver_plan,
-                last_deployment,
-                execution_id=cycle_exec_id,
-                cancellation_check=cancellation_check,
-                context=context,
-            )
-
-            if last_outcome.state == VerificationState.CANCELLED:
-                return ClosedLoopResult(
-                    incident_id=incident.incident_id,
-                    execution_id=execution_id,
-                    status="cancelled",
-                    cycles=cycle,
-                    last_outcome=last_outcome,
-                    deployment_result=last_deployment,
-                    resolution=None,
-                    duration_ms=_duration(),
-                )
-
-            # ── PASS → resolve ────────────────────────────────────────────
-            if last_outcome.passed:
-                resolution = await self._resolve(
-                    incident, execution_id, cycle, last_outcome, _duration()
-                )
-                bound_log.info(
-                    "closed_loop_resolved",
-                    cycle=cycle,
-                    duration_ms=round(_duration(), 2),
-                )
-                return _resolved(resolution)
-
-            # ── FAIL → prepare next reinvestigation cycle ─────────────────
-            bound_log.warning(
-                "closed_loop_verification_failed",
-                cycle=cycle,
-                reason=last_outcome.failure_reason,
-            )
-            await self._emit(
-                INCIDENT_REINVESTIGATION_REQUIRED,
-                {
-                    "incident_id": incident.incident_id,
-                    "execution_id": execution_id,
-                    "cycle": cycle,
-                    "reason": last_outcome.failure_reason,
-                    "max_cycles": self.max_reinvestigation_cycles,
-                },
-            )
-
-            if cycle >= self.max_reinvestigation_cycles:
-                bound_log.error(
-                    "closed_loop_max_cycles_reached",
-                    cycles=cycle,
-                )
-                await self._emit(
-                    REINVESTIGATION_LIMIT_REACHED,
-                    {
-                        "incident_id": incident.incident_id,
-                        "execution_id": execution_id,
-                        "cycles": cycle,
-                    },
-                )
-                await self._emit(
-                    INCIDENT_ESCALATED,
-                    {
-                        "incident_id": incident.incident_id,
-                        "execution_id": execution_id,
-                        "reason": "max_reinvestigation_cycles_reached",
-                    },
-                )
+            
+            # Attempt to persist ESCALATED status (cannot auto-resolve due to error)
+            try:
                 await self._update_status(incident, IncidentStatus.ESCALATED)
-                return _escalated(
-                    f"Max reinvestigation cycles ({self.max_reinvestigation_cycles}) reached"
-                    f" without verification passing."
+            except Exception as status_exc:
+                bound_log.exception(
+                    "closed_loop_escalated_status_persistence_failed",
+                    status_error=str(status_exc),
                 )
-
-        # Should not reach here; belt-and-suspenders
-        return _escalated("Loop exited without resolution.")
+            
+            # Return failed result with exception details
+            return ClosedLoopResult(
+                incident_id=incident.incident_id,
+                execution_id=execution_id,
+                status="failed",
+                cycles=0,
+                last_outcome=None,
+                deployment_result=None,
+                resolution=None,
+                duration_ms=(time.monotonic() - t0) * 1000,
+                failure_reason=f"{type(exc).__name__}: {exc}",
+            )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

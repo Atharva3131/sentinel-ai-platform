@@ -145,6 +145,7 @@ async def create_incident(
                 error_type=type(exc).__name__,
                 incident_id=result.incident.incident_id,
             )
+            
 
     return CreateIncidentResponse(
         incident=_domain_to_response(result.incident),

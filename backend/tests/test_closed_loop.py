@@ -62,6 +62,7 @@ from backend.policies.action_policy import ActionPolicy, RemediationPolicyEngine
 from backend.providers.github.fake_deployment import FakeDeploymentProvider
 from backend.services.closed_loop_orchestrator import (
     ClosedLoopOrchestrator,
+    ClosedLoopResult,
     _default_verification_plan,
 )
 from backend.services.deployment_pipeline import DeploymentPipeline
@@ -1072,3 +1073,238 @@ async def test_complete_closed_loop_max_cycles_escalation() -> None:
     plan = _default_verification_plan(inc)
     assert plan.incident_id == inc.incident_id
     assert "error_rate" in plan.metrics_to_compare
+
+
+# ── 21. Unexpected exception from investigation is caught and returned as failed ───────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_catches_investigation_exception() -> None:
+    """Verify run() returns ClosedLoopResult(status=failed) when investigation raises."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="exc-investigation")
+
+    class FailingInvestigation:
+        """Mock investigation that raises an unexpected exception."""
+        async def investigate(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Simulated investigation failure")
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=FailingInvestigation(),  # type: ignore[arg-type]
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    # Must NOT raise; must return a ClosedLoopResult
+    result = await orchestrator.run(inc, execution_id="exec-exc-test")
+
+    # Verify result structure
+    assert result is not None
+    assert result.status == "failed"
+    assert result.incident_id == inc.incident_id
+    assert result.cycles == 0
+    assert result.duration_ms > 0.0
+
+    # Verify failure_reason contains exception details
+    assert result.failure_reason is not None
+    assert "RuntimeError" in result.failure_reason
+    assert "investigation failure" in result.failure_reason
+
+    # Verify incident was persisted with ESCALATED status (cannot auto-resolve)
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+
+
+# ── 22. Unexpected exception from verification is caught and returned as failed ───────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_catches_verification_exception() -> None:
+    """Verify run() returns ClosedLoopResult(status=failed) when verification raises."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="exc-verification")
+
+    class FailingVerification:
+        """Mock verification coordinator that raises an unexpected exception."""
+        async def verify(self, *args: Any, **kwargs: Any) -> Any:
+            raise ValueError("Verification engine internal error")
+
+    coordinator = FailingVerification()
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(emitter=emitter),
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,  # type: ignore[arg-type]
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-exc-verify")
+
+    # Verify failure result
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "ValueError" in result.failure_reason
+    assert "Verification engine internal error" in result.failure_reason
+
+    # Verify incident was persisted with ESCALATED status
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+
+
+# ── 23. Unexpected exception from deployment pipeline is caught and returned as failed ──
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_catches_deployment_exception() -> None:
+    """Verify run() catches exceptions that escape deployment_pipeline.deploy()."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="exc-deployment")
+
+    class FailingDeploymentPipeline:
+        """Mock deployment pipeline that raises an unexpected exception."""
+        async def deploy(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Deployment system failure")
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = FailingDeploymentPipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(emitter=emitter),
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,  # type: ignore[arg-type]
+        verification=coordinator,
+        repository=repo,
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-exc-deploy")
+
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "RuntimeError" in result.failure_reason
+    assert "Deployment system failure" in result.failure_reason
+
+    # Verify incident was persisted with ESCALATED status
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+
+
+# ── 24. Repository.save() failure during FAILED status persistence doesn't raise ──────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_survives_failed_status_persistence() -> None:
+    """Verify run() returns failed result even if persisting FAILED status fails."""
+    emitter = _EventCollector()
+    
+    class FailingRepository:
+        """Mock repository that fails to save."""
+        async def get(self, incident_id: str) -> Any:
+            return None
+        
+        async def save(self, incident: Any) -> None:
+            raise OSError("Database connection lost")
+
+    repo = FailingRepository()
+    inc = _incident(inc_id="exc-repo-fail")
+
+    class FailingInvestigation:
+        """Investigation that raises to trigger the exception handler."""
+        async def investigate(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("Investigation failed")
+
+    coordinator = _make_verification_coordinator(emitter=emitter)
+    pipeline = _make_deployment_pipeline()
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=FailingInvestigation(),  # type: ignore[arg-type]
+        remediation_engine=_make_remediation_engine(),
+        deployment_pipeline=pipeline,
+        verification=coordinator,
+        repository=repo,  # type: ignore[arg-type]
+        remediation_planner=_noop_planner,
+        event_emitter=emitter,
+        max_reinvestigation_cycles=3,
+    )
+
+    # Must NOT raise even though repository.save() fails
+    result = await orchestrator.run(inc, execution_id="exec-exc-repo")
+
+    # Should still return failed result
+    assert result is not None
+    assert result.status == "failed"
+    assert result.failure_reason is not None
+    assert "RuntimeError" in result.failure_reason
+    # The result should reflect the original investigation failure, not the repo failure
+    assert "Investigation failed" in result.failure_reason
+
+
+# ── 25. Run() never raises; always returns ClosedLoopResult ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_run_never_raises() -> None:
+    """Verify run() honors its contract: never raises, always returns ClosedLoopResult."""
+    emitter = _EventCollector()
+    repo = InMemoryIncidentRepository()
+
+    # Multiple failure scenarios
+    failure_scenarios = [
+        ("investigation_error", RuntimeError("Investigation error")),
+        ("verification_error", ValueError("Verification error")),
+        ("unknown_error", Exception("Unknown error")),
+    ]
+
+    for scenario_id, exception_to_raise in failure_scenarios:
+        inc = _incident(inc_id=f"never-raise-{scenario_id}")
+
+        class FailingInvestigation:
+            def __init__(self, exc: Exception) -> None:
+                self.exc = exc
+
+            async def investigate(self, *args: Any, **kwargs: Any) -> Any:
+                raise self.exc
+
+        coordinator = _make_verification_coordinator(emitter=emitter)
+        pipeline = _make_deployment_pipeline()
+
+        orchestrator = ClosedLoopOrchestrator(
+            investigation=FailingInvestigation(exception_to_raise),  # type: ignore[arg-type]
+            remediation_engine=_make_remediation_engine(),
+            deployment_pipeline=pipeline,
+            verification=coordinator,
+            repository=repo,
+            remediation_planner=_noop_planner,
+            event_emitter=emitter,
+            max_reinvestigation_cycles=3,
+        )
+
+        # This must not raise
+        result = await orchestrator.run(inc)
+
+        # Result must always be present and be a ClosedLoopResult
+        assert result is not None
+        assert isinstance(result, ClosedLoopResult)
+        assert result.status == "failed"
+        assert result.incident_id == inc.incident_id
