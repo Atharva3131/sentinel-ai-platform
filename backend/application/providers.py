@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Sequence
+from typing import Any
 
 from azure.cosmos.aio import CosmosClient, DatabaseProxy
 from azure.storage.blob.aio import BlobServiceClient
@@ -550,6 +551,27 @@ class ApplicationProvider(Provider):
             event_emitter=event_publisher,
         )
 
+    # ── Azure Remediation Service ─────────────────────────────────────────
+
+    @provide(scope=Scope.APP)
+    def azure_remediation_service(
+        self,
+        settings: AppSettings,
+    ) -> Any:
+        """Return the Azure Container Apps remediation service for Demo 1 incidents.
+
+        Returns None if disabled; this allows ClosedLoopOrchestrator to skip Azure
+        remediation checks gracefully when the feature is not configured or active.
+
+        When enabled, constructs AzureRemediationService with the configured settings.
+        When disabled, returns None to safely short-circuit all Azure logic.
+        """
+        if not settings.azure_remediation.enabled:
+            return None
+
+        from backend.services.azure_remediation import AzureRemediationService
+        return AzureRemediationService(settings.azure_remediation)
+
     # ── ClosedLoopOrchestrator ────────────────────────────────────────────
 
     @provide(scope=Scope.REQUEST)
@@ -563,6 +585,7 @@ class ApplicationProvider(Provider):
         planner: GitHubRemediationPlanner,
         event_publisher: RedisWorkflowEventPublisher,
         settings: AppSettings,
+        azure_remediation_service: Any,
     ) -> ClosedLoopOrchestrator:
         """Return the fully wired autonomous closed-loop orchestrator.
 
@@ -579,6 +602,7 @@ class ApplicationProvider(Provider):
             repository=repository,
             remediation_planner=planner.plan,
             event_emitter=event_publisher,
+            azure_remediation_service=azure_remediation_service,
             deployment_owner=settings.github.default_owner,
             deployment_repo=settings.github.default_repository,
             deployment_workflow=settings.deployment.workflow,

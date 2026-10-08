@@ -386,7 +386,7 @@ class VerificationCoordinator:
         except Exception as exc:
             log.warning(
                 "verification_event_emission_failed",
-                event=event_name, error=str(exc)
+                event_name=event_name, error=str(exc)
             )
 
 

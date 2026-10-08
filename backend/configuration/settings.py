@@ -52,9 +52,6 @@ class OpenTelemetrySettings(BaseModel):
     trace_sample_ratio: float = Field(default=0.1, ge=0.0, le=1.0)
     export_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
     exclude_health_endpoints: bool = True
-    # Optional Azure Monitor / Application Insights export.
-    # When set, traces are exported to both OTLP (if configured) AND Azure Monitor.
-    # The connection string is a SecretStr — it is never logged or exposed.
     azure_monitor_connection_string: SecretStr | None = None
 
 
@@ -80,6 +77,7 @@ class AzureCredentialSettings(BaseModel):
                 )
         return self
 
+
 class KeyVaultSettings(BaseModel):
     """Azure Key Vault configuration."""
 
@@ -91,8 +89,11 @@ class KeyVaultSettings(BaseModel):
     @model_validator(mode="after")
     def validate_enabled(self) -> Self:
         if self.enabled and not self.url:
-            raise ValueError("key_vault.url must be configured when Key Vault is enabled")
+            raise ValueError(
+                "key_vault.url must be configured when Key Vault is enabled"
+            )
         return self
+
 
 class PostgresSettings(BaseModel):
     """PostgreSQL connectivity and pool settings."""
@@ -143,7 +144,7 @@ class RedisSettings(BaseModel):
 
         scheme = "rediss" if self.ssl else "redis"
         username = quote(self.username, safe="") if self.username else ""
-        password = self.password.get_secret_value() if self.password is not None else None
+        password = self.password.get_secret_value() if self.password else None
         auth = ""
         if username and password is not None:
             auth = f"{username}:{quote(password, safe='')}@"
@@ -190,7 +191,7 @@ class CosmosSettings(BaseModel):
         """Require either a connection string or endpoint when Cosmos is enabled."""
         if self.enabled and not self.connection_string and not self.endpoint:
             raise ValueError(
-                "cosmos requires connection_string or endpoint when the integration is enabled"
+                "cosmos requires connection_string or endpoint when enabled"
             )
         return self
 
@@ -205,10 +206,10 @@ class BlobStorageSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_configuration(self) -> Self:
-        """Require either a connection string or account URL when Blob Storage is enabled."""
+        """Require either a connection string or account URL when enabled."""
         if self.enabled and not self.connection_string and not self.account_url:
             raise ValueError(
-                "blob requires connection_string or account_url when the integration is enabled"
+                "blob requires connection_string or account_url when enabled"
             )
         return self
 
@@ -233,26 +234,22 @@ class FeatureFlagSettings(BaseModel):
 class AzureMonitorMetricsSettings(BaseModel):
     """Azure Monitor / Application Insights metrics query configuration.
 
-    Used by ``AzureMonitorMetricsSnapshot`` (the production ``MetricsSnapshotPort``
-    implementation) to query per-service metric values for the closed-loop
-    verification step.
+    Used by ``AzureMonitorMetricsSnapshot`` to query per-service metric values
+    for closed-loop verification.
 
     Authentication priority:
       1. ``api_key`` — API key sent as ``x-api-key`` (no AAD needed).
-      2. AAD credential from ``AzureCredentialSettings`` (Managed Identity /
-         Service Principal) when ``api_key`` is not set.
+      2. AAD credential from ``AzureCredentialSettings`` when ``api_key`` not set.
 
     Environment variable examples::
 
         SENTINEL_AZURE_MONITOR_METRICS__ENABLED=true
-        SENTINEL_AZURE_MONITOR_METRICS__APP_ID=<Application-Insights-app-id>
-        SENTINEL_AZURE_MONITOR_METRICS__API_KEY=<api-access-key>
+        SENTINEL_AZURE_MONITOR_METRICS__APP_ID=<app-id>
+        SENTINEL_AZURE_MONITOR_METRICS__API_KEY=<key>
     """
 
     enabled: bool = False
-    # Application Insights application ID (GUID or app-short-name)
     app_id: str = ""
-    # API key — when set, bypasses AAD token acquisition
     api_key: SecretStr | None = None
     base_url: str = "https://api.applicationinsights.io"
     timeout_seconds: float = Field(default=30.0, gt=0.0)
@@ -271,7 +268,7 @@ class DeploymentProviderName(StrEnum):
 class DeploymentSettings(BaseModel):
     """Deployment provider configuration.
 
-    Disabled by default.  Set ``enabled=true`` and configure the provider
+    Disabled by default. Set ``enabled=true`` and configure the provider
     to activate automated deployment triggering.
 
     Environment variable examples::
@@ -286,15 +283,10 @@ class DeploymentSettings(BaseModel):
 
     enabled: bool = False
     provider: DeploymentProviderName = DeploymentProviderName.FAKE
-    # GitHub Actions workflow filename (e.g. "deploy.yml")
     workflow: str = "deploy.yml"
-    # Deployment target environment name (e.g. "staging", "production")
     environment: str = "staging"
-    # Maximum seconds to wait for a deployment to complete
     timeout_seconds: float = Field(default=600.0, gt=0.0)
-    # Polling interval when waiting for deployment completion
     poll_interval_seconds: float = Field(default=15.0, gt=0.0)
-    # Retry settings for transient API failures
     max_retries: int = Field(default=3, ge=0)
     retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
     retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
@@ -304,7 +296,6 @@ class RemediationSettings(BaseModel):
     """Remediation policy and execution configuration.
 
     Controls whether HIGH-risk actions are auto-approved without human review.
-    Default behavior requires approval for HIGH-risk actions.
 
     Environment variable examples::
 
@@ -314,8 +305,7 @@ class RemediationSettings(BaseModel):
     auto_approve_high_risk: bool = Field(
         default=False,
         description=(
-            "Auto-approve HIGH-risk remediation actions without human approval "
-            "(demo/autonomous mode)"
+            "Auto-approve HIGH-risk remediation actions without human approval"
         ),
     )
 
@@ -324,8 +314,7 @@ class GitHubSettings(BaseModel):
     """GitHub API configuration for the remediation integration.
 
     Disabled by default — set ``enabled=true`` to activate.
-    The ``token`` must arrive through environment variables or secret files;
-    it is stored as ``SecretStr`` and never logged.
+    The ``token`` must arrive through environment variables or secret files.
 
     Environment variable examples::
 
@@ -344,16 +333,15 @@ class GitHubSettings(BaseModel):
     max_retries: int = Field(default=3, ge=0)
     retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
     retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
-    # Maximum items returned per paginated list call
     per_page: int = Field(default=30, ge=1, le=100)
 
 
 class EvidenceProviderName(StrEnum):
-    """Supported evidence provider names — one per source kind."""
+    """Supported evidence provider names."""
 
     PROMETHEUS = "prometheus"
     ELASTIC = "elastic"
-    OTLP = "otlp"          # Jaeger-compatible OTLP HTTP
+    OTLP = "otlp"
     AZURE_MONITOR = "azure_monitor"
     FAKE = "fake"
 
@@ -361,9 +349,7 @@ class EvidenceProviderName(StrEnum):
 class EvidenceProviderSettings(BaseModel):
     """Shared settings for a single evidence source provider.
 
-    Credentials arrive only through environment variables / secret files;
-    they are never embedded in source code.  ``api_key`` and ``password`` are
-    ``SecretStr`` to prevent accidental log exposure.
+    Credentials arrive only through environment variables / secret files.
     """
 
     name: EvidenceProviderName = EvidenceProviderName.FAKE
@@ -376,18 +362,14 @@ class EvidenceProviderSettings(BaseModel):
     max_retries: int = Field(default=3, ge=0)
     retry_min_wait_seconds: float = Field(default=0.5, gt=0.0)
     retry_max_wait_seconds: float = Field(default=5.0, gt=0.0)
-    # Default window passed when no per-request window is given
     default_window_seconds: float = Field(default=300.0, gt=0.0)
-    # Upper bound on items returned per collection call
     max_items: int = Field(default=20, ge=1)
 
 
 class EvidenceSettings(BaseModel):
     """Evidence collection provider configuration.
 
-    Each source kind (metrics, logs, traces) has its own provider settings so
-    different systems can be used for each.  Set ``name=fake`` for any provider
-    to use the in-memory fake — no network calls are made.
+    Each source kind (metrics, logs, traces) has its own provider settings.
 
     Environment variable examples::
 
@@ -395,8 +377,6 @@ class EvidenceSettings(BaseModel):
         SENTINEL_EVIDENCE__METRICS__BASE_URL=http://prometheus:9090
         SENTINEL_EVIDENCE__LOGS__NAME=elastic
         SENTINEL_EVIDENCE__LOGS__BASE_URL=http://elasticsearch:9200
-        SENTINEL_EVIDENCE__LOGS__USERNAME=elastic
-        SENTINEL_EVIDENCE__LOGS__PASSWORD=changeme
         SENTINEL_EVIDENCE__TRACES__NAME=otlp
         SENTINEL_EVIDENCE__TRACES__BASE_URL=http://jaeger:16686
     """
@@ -431,7 +411,6 @@ class LLMProviderSettings(BaseModel):
     max_retries: int = Field(default=3, ge=0)
     retry_min_wait_seconds: float = Field(default=1.0, gt=0.0)
     retry_max_wait_seconds: float = Field(default=10.0, gt=0.0)
-    # Model defaults
     temperature: float | None = None
     max_output_tokens: int | None = None
 
@@ -443,12 +422,42 @@ class LLMSettings(BaseModel):
         default_factory=LLMProviderSettings
     )
     fallback: LLMProviderSettings | None = None
-    # When True, automatically fall back to the fallback provider on errors
     enable_fallback: bool = True
 
 
+class AzureRemediationSettings(BaseModel):
+    """Azure Container Apps remediation configuration for Demo 1 incidents.
+
+    Handles automatic restart of Container Apps to recover from connection-leak
+    incidents. Requires explicit Demo 1 correlation ID pattern matching.
+
+    Environment variable examples::
+
+        SENTINEL_AZURE_REMEDIATION__ENABLED=true
+        SENTINEL_AZURE_REMEDIATION__RESOURCE_GROUP=sentinel-ai-rg
+        SENTINEL_AZURE_REMEDIATION__CONTAINER_APP_NAME=demo1-order-api-standard
+        SENTINEL_AZURE_REMEDIATION__HEALTH_CHECK_URL=https://demo1.../health
+        SENTINEL_AZURE_REMEDIATION__CORRELATION_ID_PATTERN=demo1-.*-connection_leak-.*
+        SENTINEL_AZURE_REMEDIATION__MANAGED_IDENTITY_CLIENT_ID=<client-id>
+    """
+
+    enabled: bool = False
+    resource_group: str = ""
+    container_app_name: str = ""
+    health_check_url: str = ""
+    correlation_id_pattern: str = "demo1-.*-connection_leak-.*"
+    max_restart_attempts: int = Field(default=3, ge=1, le=10)
+    health_check_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    health_check_poll_interval_seconds: float = Field(default=5.0, gt=0.0)
+    health_check_max_duration_seconds: float = Field(default=120.0, gt=0.0)
+    managed_identity_client_id: str | None = Field(
+        default=None,
+        description="Azure Managed Identity client ID. Required when enabled=true.",
+    )
+
+
 class AppSettings(BaseSettings):
-    """Root application settings loaded from environment variables and secret files."""
+    """Root application settings from environment variables and secret files."""
 
     model_config = SettingsConfigDict(
         env_file=DEFAULT_ENV_FILE,
@@ -467,7 +476,9 @@ class AppSettings(BaseSettings):
     api_prefix: str = "/api/v1"
     server: ServerSettings = Field(default_factory=ServerSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
-    opentelemetry: OpenTelemetrySettings = Field(default_factory=OpenTelemetrySettings)
+    opentelemetry: OpenTelemetrySettings = Field(
+        default_factory=OpenTelemetrySettings
+    )
     azure: AzureCredentialSettings = Field(default_factory=AzureCredentialSettings)
     key_vault: KeyVaultSettings = Field(default_factory=KeyVaultSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
@@ -485,6 +496,9 @@ class AppSettings(BaseSettings):
     azure_monitor_metrics: AzureMonitorMetricsSettings = Field(
         default_factory=AzureMonitorMetricsSettings
     )
+    azure_remediation: AzureRemediationSettings = Field(
+        default_factory=AzureRemediationSettings
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -495,7 +509,7 @@ class AppSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Load in order: explicit kwargs, environment, dotenv, then nested secret files."""
+        """Load in order: kwargs, env, dotenv, then secret files."""
         nested_secret_settings = NestedSecretsSettingsSource(
             file_secret_settings,
             secrets_nested_delimiter="__",
@@ -510,7 +524,7 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_environment_constraints(self) -> Self:
-        """Apply profile expectations and reject unsafe production configuration."""
+        """Apply profile expectations and reject unsafe production config."""
         if self.environment == DeploymentEnvironment.TESTING:
             self.debug = False
             self.logging.json_output = False
@@ -520,7 +534,7 @@ class AppSettings(BaseSettings):
             if self.debug:
                 raise ValueError("debug must be disabled in production")
             if not self.logging.json_output:
-                raise ValueError("logging.json_output must be enabled in production")
+                raise ValueError("json_output must be enabled in production")
 
         return self
 
@@ -545,13 +559,19 @@ class DevelopmentSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[DeploymentEnvironment.DEVELOPMENT] = DeploymentEnvironment.DEVELOPMENT
+    environment: Literal[
+        DeploymentEnvironment.DEVELOPMENT
+    ] = DeploymentEnvironment.DEVELOPMENT
     debug: bool = True
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(level="DEBUG", json_output=False)
+        default_factory=lambda: LoggingSettings(
+            level="DEBUG", json_output=False
+        )
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(enabled=True, trace_sample_ratio=1.0)
+        default_factory=lambda: OpenTelemetrySettings(
+            enabled=True, trace_sample_ratio=1.0
+        )
     )
 
 
@@ -560,17 +580,29 @@ class TestingSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[DeploymentEnvironment.TESTING] = DeploymentEnvironment.TESTING
+    environment: Literal[
+        DeploymentEnvironment.TESTING
+    ] = DeploymentEnvironment.TESTING
     debug: bool = False
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(level="WARNING", json_output=False)
+        default_factory=lambda: LoggingSettings(
+            level="WARNING", json_output=False
+        )
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(enabled=False, trace_sample_ratio=0.0)
+        default_factory=lambda: OpenTelemetrySettings(
+            enabled=False, trace_sample_ratio=0.0
+        )
     )
-    neo4j: Neo4jSettings = Field(default_factory=lambda: Neo4jSettings(enabled=False))
-    cosmos: CosmosSettings = Field(default_factory=lambda: CosmosSettings(enabled=False))
-    blob: BlobStorageSettings = Field(default_factory=lambda: BlobStorageSettings(enabled=False))
+    neo4j: Neo4jSettings = Field(
+        default_factory=lambda: Neo4jSettings(enabled=False)
+    )
+    cosmos: CosmosSettings = Field(
+        default_factory=lambda: CosmosSettings(enabled=False)
+    )
+    blob: BlobStorageSettings = Field(
+        default_factory=lambda: BlobStorageSettings(enabled=False)
+    )
 
 
 class ProductionSettings(AppSettings):
@@ -578,17 +610,25 @@ class ProductionSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[DeploymentEnvironment.PRODUCTION] = DeploymentEnvironment.PRODUCTION
+    environment: Literal[
+        DeploymentEnvironment.PRODUCTION
+    ] = DeploymentEnvironment.PRODUCTION
     debug: bool = False
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(level="INFO", json_output=True)
+        default_factory=lambda: LoggingSettings(
+            level="INFO", json_output=True
+        )
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(enabled=True, trace_sample_ratio=0.1)
+        default_factory=lambda: OpenTelemetrySettings(
+            enabled=True, trace_sample_ratio=0.1
+        )
     )
 
 
-def _resolve_settings_class(environment: DeploymentEnvironment) -> type[AppSettings]:
+def _resolve_settings_class(
+    environment: DeploymentEnvironment,
+) -> type[AppSettings]:
     if environment == DeploymentEnvironment.DEVELOPMENT:
         return DevelopmentSettings
     if environment == DeploymentEnvironment.TESTING:
@@ -621,7 +661,7 @@ def load_settings(
 
 @lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
-    """Return cached settings for dependency injection and application startup."""
+    """Return cached settings for dependency injection and startup."""
     return load_settings()
 
 

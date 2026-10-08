@@ -125,6 +125,7 @@ class ClosedLoopOrchestrator:
       ``remediation_planner``— callable(incident, rca) → RemediationPlan
       ``verification_planner_factory`` — callable(incident, cycle) → VerificationPlan
       ``event_emitter``      — IncidentEventEmitter
+      ``azure_remediation_service`` — AzureRemediationService for Demo 1 incidents
       ``max_reinvestigation_cycles`` — hard limit (default 3)
       ``deployment_owner``   — GitHub owner for deployment requests
       ``deployment_repo``    — GitHub repository
@@ -141,6 +142,7 @@ class ClosedLoopOrchestrator:
     remediation_planner: Any | None = None
     verification_planner_factory: Any | None = None  # (incident, cycle) → VerificationPlan
     event_emitter: Any | None = None
+    azure_remediation_service: Any | None = None
     max_reinvestigation_cycles: int = _DEFAULT_MAX_CYCLES
     deployment_owner: str = ""
     deployment_repo: str = ""
@@ -283,6 +285,41 @@ class ClosedLoopOrchestrator:
                     )
 
                 rca = investigation_result.rca
+
+                # ── Azure remediation (if wired and incident matches Demo 1 pattern) ──────
+                # This is an optional early-exit path for specific incidents that can be
+                # resolved by restarting a Container App and verifying health recovery.
+                if self.azure_remediation_service is not None:
+                    should_try_azure = await (
+                        self.azure_remediation_service.should_remediate(incident)
+                    )
+                    if should_try_azure:
+                        azure_result = await (
+                            self.azure_remediation_service.remediate(incident)
+                        )
+                        if azure_result.succeeded:
+                            bound_log.info(
+                                "closed_loop_azure_remediation_succeeded",
+                                cycle=cycle,
+                                duration_ms=round(azure_result.health_check_duration_ms, 2),
+                            )
+                            # Emit resolution event and persist status
+                            resolution = await self._resolve(
+                                incident,
+                                execution_id,
+                                cycle,
+                                None,  # no verification outcome for Azure remediation path
+                                _duration(),
+                            )
+                            return _resolved(resolution)
+                        else:
+                            bound_log.warning(
+                                "closed_loop_azure_remediation_failed",
+                                cycle=cycle,
+                                reason=azure_result.reason,
+                                restart_attempt=azure_result.restart_attempt,
+                            )
+                            # Fall through to normal remediation/deployment path
 
                 # ── Remediation (if planner and engine are wired) ─────────────
                 if self.remediation_planner is not None:
@@ -513,7 +550,7 @@ class ClosedLoopOrchestrator:
         incident: Incident,
         execution_id: str,
         cycle: int,
-        outcome: VerificationOutcome,
+        outcome: VerificationOutcome | None,
         duration_ms: float,
     ) -> IncidentResolution:
         resolution = IncidentResolution(
@@ -532,8 +569,8 @@ class ClosedLoopOrchestrator:
             ),
             metadata={
                 "cycles": cycle,
-                "deployment_id": outcome.deployment_id,
-                "verification_state": outcome.state.value,
+                "deployment_id": (outcome.deployment_id if outcome else None),
+                "verification_state": (outcome.state.value if outcome else "azure_remediation"),
             },
         )
         await self._update_status(incident, IncidentStatus.RESOLVED)
@@ -603,3 +640,37 @@ def _default_verification_plan(incident: Incident) -> VerificationPlan:
             for svc in incident.affected_services
         },
     )
+"""ClosedLoopOrchestrator — the final autonomous incident lifecycle.
+
+Completes the closed loop:
+
+  Incident
+    ↓ ingestion
+  Investigation
+    ↓ RCA
+  Remediation (GitHub PR + deployment)
+    ↓
+  VerificationCoordinator
+    ├── PASS → RESOLVED
+    └── FAIL → Reinvestigation (up to max_cycles)
+                  └── Revised remediation + deployment
+                        └── PASS → RESOLVED
+                        └── max_cycles exceeded → ESCALATED
+
+This orchestrator does NOT:
+  * Re-implement ingestion, investigation, or remediation logic.
+  * Add new observability providers.
+  * Know about specific incident types.
+  * Know about specific metrics or services.
+
+All loops are bounded by ``max_reinvestigation_cycles`` to prevent infinite
+remediation storms.  When the limit is reached the incident is escalated.
+
+Idempotency:
+  * Each cycle gets a unique ``execution_id``.
+  * Deployment requests carry idempotency keys derived from
+    incident_id + environment + ref + cycle_number.
+  * The incident repository is used to detect already-resolved incidents
+    before starting a new cycle.
+"""
+
