@@ -168,23 +168,19 @@ async def test_fake_llm_parses_json_content_as_structured() -> None:
     output = {"key": "value", "score": 0.9}
     fake = FakeLLMProvider(responses=[json.dumps(output)])
 
-    response = await fake.generate(
-        _request(structured_schema={"type": "object"})
-    )
+    response = await fake.generate(_request(structured_schema={"type": "object"}))
 
     assert response.structured_output == output
 
 
 @pytest.mark.asyncio
-async def test_fake_llm_wraps_non_json_as_structured() -> None:
-    """FakeLLMProvider wraps non-JSON in content key when schema is set."""
+async def test_fake_llm_rejects_non_json_as_structured() -> None:
+    """FakeLLMProvider leaves malformed structured output unparsed."""
     fake = FakeLLMProvider(responses=["not json at all"])
 
-    response = await fake.generate(
-        _request(structured_schema={"type": "object"})
-    )
+    response = await fake.generate(_request(structured_schema={"type": "object"}))
 
-    assert response.structured_output == {"content": "not json at all"}
+    assert response.structured_output is None
 
 
 # ── 9. Tool-call handling ───────────────────────────────────────────────────

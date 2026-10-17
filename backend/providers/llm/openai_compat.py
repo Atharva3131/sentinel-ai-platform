@@ -47,6 +47,7 @@ from backend.interfaces.llm import (
     LLMRateLimitError,
     LLMRequest,
     LLMResponse,
+    LLMStructuredOutputError,
     LLMTimeoutError,
     LLMToolCall,
     LLMUnavailableError,
@@ -125,9 +126,7 @@ class OpenAICompatibleLLMAdapter:
             _set_span_attrs(span, request, self.provider_name)
             t0 = time.monotonic()
             try:
-                response = await self._execute_with_retry(
-                    payload, correlation_id, request
-                )
+                response = await self._execute_with_retry(payload, correlation_id, request)
             except LLMError:
                 span.set_status(StatusCode.ERROR)
                 raise
@@ -170,9 +169,7 @@ class OpenAICompatibleLLMAdapter:
         while True:
             # Check cancellation before each attempt
             if request.cancellation_token is not None and request.cancellation_token.is_set():
-                raise LLMCancelledError(
-                    "Request cancelled during retry", provider=self.name
-                )
+                raise LLMCancelledError("Request cancelled during retry", provider=self.name)
 
             attempt += 1
             try:
@@ -206,9 +203,7 @@ class OpenAICompatibleLLMAdapter:
                 # Not retryable
                 raise
 
-    async def _send_once(
-        self, payload: dict[str, Any], request: LLMRequest
-    ) -> LLMResponse:
+    async def _send_once(self, payload: dict[str, Any], request: LLMRequest) -> LLMResponse:
         effective_timeout = (
             min(request.timeout_seconds, self.timeout_seconds)
             if request.timeout_seconds is not None
@@ -294,12 +289,17 @@ class OpenAICompatibleLLMAdapter:
                     "schema": request.structured_schema,
                 },
             }
+            # Sarvam's V1 chat API supports explicitly disabling reasoning with
+            # reasoning_effort=null.  Structured RCA responses are short JSON
+            # objects; reasoning tokens can consume the response budget before
+            # any visible JSON is emitted.  Keep this provider-specific and
+            # limited to structured requests.
+            if self.provider_name == "sarvam":
+                payload["reasoning_effort"] = None
 
         return payload
 
-    def _parse_response(
-        self, http_response: httpx.Response, request: LLMRequest
-    ) -> LLMResponse:
+    def _parse_response(self, http_response: httpx.Response, request: LLMRequest) -> LLMResponse:
         """Translate an HTTP response to a neutral LLMResponse."""
         status = http_response.status_code
 
@@ -343,6 +343,7 @@ class OpenAICompatibleLLMAdapter:
         message = choice["message"]
         content: str = message.get("content") or ""
         finish_reason: str = choice.get("finish_reason", "stop")
+        reasoning_content = message.get("reasoning_content")
 
         # Tool calls
         tool_calls: list[LLMToolCall] = []
@@ -372,11 +373,29 @@ class OpenAICompatibleLLMAdapter:
 
         # Structured output
         structured: dict[str, Any] | None = None
-        if request.structured_schema is not None and content:
+        if request.structured_schema is not None:
+            if not content.strip():
+                raise LLMStructuredOutputError(
+                    "Structured response contained no visible JSON content "
+                    f"(finish_reason={finish_reason})",
+                    provider=self.name,
+                    raw_content=content,
+                )
             try:
-                structured = json.loads(content)
-            except (json.JSONDecodeError, ValueError):
-                structured = {"content": content}
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise LLMStructuredOutputError(
+                    "Structured response was not valid JSON",
+                    provider=self.name,
+                    raw_content=content,
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise LLMStructuredOutputError(
+                    "Structured response must be a JSON object",
+                    provider=self.name,
+                    raw_content=content,
+                )
+            structured = parsed
 
         return LLMResponse(
             content=content,
@@ -386,7 +405,12 @@ class OpenAICompatibleLLMAdapter:
             structured_output=structured,
             usage=usage,
             context=request.context,
-            metadata={"provider": self.provider_name},
+            metadata={
+                "provider": self.provider_name,
+                "finish_reason": finish_reason,
+                "response_content_length": len(content),
+                "reasoning_content_present": bool(reasoning_content),
+            },
         )
 
 
@@ -401,6 +425,7 @@ def _set_span_attrs(
     provider_name: str,
 ) -> None:
     from opentelemetry.trace import NonRecordingSpan
+
     if isinstance(span, NonRecordingSpan):
         return
     span.set_attribute("llm.provider", provider_name)

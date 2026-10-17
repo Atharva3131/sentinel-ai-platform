@@ -40,6 +40,7 @@ from backend.interfaces.llm import (
     LLMMessage,
     LLMProvider,
     LLMRequest,
+    LLMStructuredOutputError,
     LLMToolCall,
     LLMToolDefinition,
     LLMToolResult,
@@ -60,8 +61,16 @@ log = structlog.get_logger(__name__)
 # JSON Schema for the structured RCA output the LLM must produce
 _RCA_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["root_cause_title", "root_cause_description", "confidence",
-                 "supporting_evidence_ids", "reasoning_summary", "missing_evidence"],
+    "required": [
+        "root_cause_title",
+        "root_cause_description",
+        "confidence",
+        "supporting_evidence_ids",
+        "contradicting_evidence_ids",
+        "reasoning_summary",
+        "missing_evidence",
+    ],
+    "additionalProperties": False,
     "properties": {
         "root_cause_title": {
             "type": "string",
@@ -104,6 +113,9 @@ _RCA_OUTPUT_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+_REQUIRED_RCA_FIELDS = frozenset(_RCA_OUTPUT_SCHEMA["required"])
+_RCA_EVIDENCE_KINDS = frozenset(kind.value for kind in EvidenceSourceKind)
 
 # Tool definition exposed to the LLM
 _REQUEST_EVIDENCE_TOOL = LLMToolDefinition(
@@ -198,11 +210,10 @@ class LLMInvestigationAgent:
     model: str | None = None
     max_tool_rounds: int = 3
     acceptance_threshold: float = 0.60
+    structured_retry_attempts: int = 2
     system_prompt: str | None = None
     _normalizer: EvidenceNormalizer = field(default_factory=EvidenceNormalizer)
-    _grounder: EvidenceGroundingValidator = field(
-        default_factory=EvidenceGroundingValidator
-    )
+    _grounder: EvidenceGroundingValidator = field(default_factory=EvidenceGroundingValidator)
 
     async def investigate(
         self,
@@ -258,14 +269,10 @@ class LLMInvestigationAgent:
                 response = await self.llm_provider.generate(request)
             except LLMCancelledError:
                 bound_log.warning("llm_investigation_cancelled")
-                return self._fallback_output(
-                    incident, current_evidence, "Investigation cancelled."
-                )
+                return self._fallback_output(incident, current_evidence, "Investigation cancelled.")
             except LLMError as exc:
                 bound_log.warning("llm_investigation_error", error=str(exc))
-                return self._fallback_output(
-                    incident, current_evidence, f"LLM unavailable: {exc}"
-                )
+                return self._fallback_output(incident, current_evidence, f"LLM unavailable: {exc}")
 
             # No tool calls → proceed to structured final answer
             if not response.has_tool_calls:
@@ -275,9 +282,7 @@ class LLMInvestigationAgent:
             # Execute tool calls
             tool_round_results: list[LLMToolResult] = []
             for tc in response.tool_calls:
-                tool_result = await self._execute_tool_call(
-                    tc, incident, context=context
-                )
+                tool_result = await self._execute_tool_call(tc, incident, context=context)
                 tool_round_results.append(tool_result)
                 if tc.tool_name == "request_evidence":
                     kinds_requested = tc.arguments.get("source_kinds", [])
@@ -291,26 +296,23 @@ class LLMInvestigationAgent:
             if self.evidence_tool is not None and requested_kinds:
                 new_result = await self.evidence_tool.orchestrator.collect(
                     incident,
-                    source_kinds=set(requested_kinds[-len(response.tool_calls):]),
+                    source_kinds=set(requested_kinds[-len(response.tool_calls) :]),
                     context=context,
                 )
                 # Merge deduplicating by evidence_id
                 existing_ids = {e.evidence_id for e in current_evidence.items}
                 new_items = [
-                    e for e in new_result.collection.items
-                    if e.evidence_id not in existing_ids
+                    e for e in new_result.collection.items if e.evidence_id not in existing_ids
                 ]
                 all_items = list(current_evidence.items) + new_items
                 all_items.sort(key=lambda e: e.relevance_score, reverse=True)
                 current_evidence = EvidenceCollection(
                     incident_id=incident.incident_id,
                     items=tuple(all_items),
-                    correlations=current_evidence.correlations
-                    + new_result.collection.correlations,
+                    correlations=current_evidence.correlations + new_result.collection.correlations,
                     collected_at=datetime.now(UTC),
                     collection_duration_ms=(
-                        (current_evidence.collection_duration_ms or 0.0)
-                        + new_result.duration_ms
+                        (current_evidence.collection_duration_ms or 0.0) + new_result.duration_ms
                     ),
                     sources_consulted=current_evidence.sources_consulted
                     + new_result.collection.sources_consulted,
@@ -319,9 +321,7 @@ class LLMInvestigationAgent:
 
             # Append assistant + tool result messages for the next round
             if response.tool_calls:
-                messages.append(
-                    LLMMessage(role="assistant", content=response.content or "")
-                )
+                messages.append(LLMMessage(role="assistant", content=response.content or ""))
                 for tr in tool_round_results:
                     messages.append(
                         LLMMessage(
@@ -343,14 +343,26 @@ class LLMInvestigationAgent:
             tool_rounds += 1
 
         # Force structured final answer
-        structured = await self._get_structured_answer(
-            incident=incident,
-            messages=messages,
-            evidence=current_evidence,
-            normalized=current_normalized,
-            cancellation_token=cancellation_token,
-            context=context,
-        )
+        try:
+            structured = await self._get_structured_answer(
+                incident=incident,
+                messages=messages,
+                evidence=current_evidence,
+                normalized=current_normalized,
+                cancellation_token=cancellation_token,
+                context=context,
+            )
+        except LLMError as exc:
+            bound_log.warning(
+                "llm_structured_investigation_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return self._fallback_output(
+                incident,
+                current_evidence,
+                f"Structured RCA unavailable: {exc}",
+            )
 
         bound_log.info(
             "llm_investigation_complete",
@@ -376,48 +388,57 @@ class LLMInvestigationAgent:
         context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Send a final structured-output request and return the parsed dict."""
-        final_messages = [
-            *messages,
-            LLMMessage(
-                role="user",
-                content=(
-                    "Based on all available evidence, produce your final root cause analysis. "
-                    "Reference only evidence IDs that were provided to you. "
-                    "Respond using the required JSON schema."
+        attempts = max(1, self.structured_retry_attempts)
+        retry_instruction = ""
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            final_messages = [
+                *messages,
+                LLMMessage(
+                    role="user",
+                    content=(
+                        "Based on all available evidence, produce your final root cause analysis. "
+                        "Reference only evidence IDs that were provided to you. "
+                        "Respond with one JSON object matching the required schema and no prose."
+                        f"{retry_instruction}"
+                    ),
                 ),
-            ),
-        ]
-        request = LLMRequest(
-            messages=tuple(final_messages),
-            model=self.model,
-            tools=(),
-            structured_schema=_RCA_OUTPUT_SCHEMA,
-            timeout_seconds=(context or {}).get("timeout_seconds"),
-            cancellation_token=cancellation_token,
-            context=_make_provider_context(incident, context),
-        )
-        try:
-            response = await self.llm_provider.generate(request)
-            if response.structured_output:
-                return response.structured_output
-            # Try parsing the content as JSON
-            parsed: dict[str, Any] = json.loads(response.content)
-            return parsed
-        except (LLMError, json.JSONDecodeError, ValueError) as exc:
-            log.warning(
-                "llm_structured_answer_failed",
-                incident_id=incident.incident_id,
-                error=str(exc),
+            ]
+            request = LLMRequest(
+                messages=tuple(final_messages),
+                model=self.model,
+                tools=(),
+                structured_schema=_RCA_OUTPUT_SCHEMA,
+                timeout_seconds=(context or {}).get("timeout_seconds"),
+                cancellation_token=cancellation_token,
+                context=_make_provider_context(incident, context),
             )
-            return {
-                "root_cause_title": "Investigation inconclusive",
-                "root_cause_description": f"LLM could not produce a structured answer: {exc}",
-                "confidence": 0.0,
-                "supporting_evidence_ids": [],
-                "contradicting_evidence_ids": [],
-                "missing_evidence": [],
-                "reasoning_summary": str(exc),
-            }
+            try:
+                response = await self.llm_provider.generate(request)
+                structured = response.structured_output
+                if structured is None:
+                    structured = json.loads(response.content)
+                return _validate_structured_rca(structured)
+            except (LLMStructuredOutputError, json.JSONDecodeError, ValueError) as exc:
+                last_error = exc
+                log.warning(
+                    "llm_structured_answer_failed",
+                    incident_id=incident.incident_id,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error=str(exc),
+                )
+                retry_instruction = (
+                    " The previous response was rejected because it did not satisfy the "
+                    "required JSON object. Return every required field with the correct "
+                    "types; do not include markdown or explanatory prose."
+                )
+
+        raise LLMStructuredOutputError(
+            f"Structured RCA response failed validation after {attempts} attempt(s): {last_error}",
+            provider=self.llm_provider.name,
+        )
 
     async def _execute_tool_call(
         self,
@@ -436,9 +457,7 @@ class LLMInvestigationAgent:
                 except ValueError:
                     pass
             if kinds:
-                result = await self.evidence_tool.execute(
-                    incident, kinds, context=context
-                )
+                result = await self.evidence_tool.execute(incident, kinds, context=context)
                 content = (
                     f"Collected {result['evidence_count']} evidence items "
                     f"from {', '.join(k.value for k in kinds)}."
@@ -475,20 +494,21 @@ class LLMInvestigationAgent:
         raw_support = structured.get("supporting_evidence_ids", [])
         raw_contra = structured.get("contradicting_evidence_ids", [])
         supporting = self._grounder.validate(
-            raw_support, evidence,
+            raw_support,
+            evidence,
             incident_id=incident.incident_id,
             field_name="supporting_evidence_ids",
         )
         contradicting = self._grounder.validate(
-            raw_contra, evidence,
+            raw_contra,
+            evidence,
             incident_id=incident.incident_id,
             field_name="contradicting_evidence_ids",
         )
 
         missing_raw = structured.get("missing_evidence", [])
         missing: tuple[EvidenceSourceKind, ...] = tuple(
-            EvidenceSourceKind(k) for k in missing_raw
-            if k in {v.value for v in EvidenceSourceKind}
+            EvidenceSourceKind(k) for k in missing_raw if k in {v.value for v in EvidenceSourceKind}
         )
 
         # Build a Hypothesis from the LLM's output
@@ -605,14 +625,18 @@ class LLMInvestigationAgent:
         *,
         update: bool = False,
     ) -> str:
-        prefix = "Here is the updated evidence after your tool call:" if update else (
-            f"Incident: {incident.title}\n"
-            f"Severity: {incident.severity}\n"
-            f"Affected services: {', '.join(incident.affected_services)}\n"
-            f"Symptoms: "
-            f"{'; '.join(incident.symptoms) if incident.symptoms else 'none reported'}"
-            "\n\n"
-            "Evidence collected:"
+        prefix = (
+            "Here is the updated evidence after your tool call:"
+            if update
+            else (
+                f"Incident: {incident.title}\n"
+                f"Severity: {incident.severity}\n"
+                f"Affected services: {', '.join(incident.affected_services)}\n"
+                f"Symptoms: "
+                f"{'; '.join(incident.symptoms) if incident.symptoms else 'none reported'}"
+                "\n\n"
+                "Evidence collected:"
+            )
         )
         if not normalized.items:
             return prefix + "\n(No evidence available)"
@@ -636,10 +660,68 @@ class LLMInvestigationAgent:
 # ---------------------------------------------------------------------------
 
 
-def _make_provider_context(
-    incident: Incident, context: dict[str, Any] | None
-) -> Any:
+def _validate_structured_rca(payload: Any) -> dict[str, Any]:
+    """Validate the minimum RCA contract before domain conversion.
+
+    Provider-side JSON Schema support is useful but not sufficient: providers
+    can return a valid JSON object with missing or incorrectly typed fields.
+    Never let such an object reach ``_build_output`` where defaults could hide
+    the malformed response.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("Structured RCA response must be a JSON object")
+
+    missing = sorted(_REQUIRED_RCA_FIELDS - payload.keys())
+    if missing:
+        raise ValueError(
+            "Structured RCA response is missing required fields: " + ", ".join(missing)
+        )
+    unexpected = sorted(set(payload) - _REQUIRED_RCA_FIELDS)
+    if unexpected:
+        raise ValueError(
+            "Structured RCA response contains unsupported fields: " + ", ".join(unexpected)
+        )
+
+    title = payload["root_cause_title"]
+    description = payload["root_cause_description"]
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("Structured RCA root_cause_title must be a non-empty string")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("Structured RCA root_cause_description must be a non-empty string")
+
+    confidence = payload["confidence"]
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= confidence <= 1.0
+    ):
+        raise ValueError("Structured RCA confidence must be a number between 0 and 1")
+
+    for field_name in (
+        "supporting_evidence_ids",
+        "contradicting_evidence_ids",
+        "missing_evidence",
+    ):
+        values = payload[field_name]
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f"Structured RCA {field_name} must be a list of strings")
+
+    invalid_kinds = sorted(set(payload["missing_evidence"]) - _RCA_EVIDENCE_KINDS)
+    if invalid_kinds:
+        raise ValueError(
+            "Structured RCA missing_evidence contains unsupported categories: "
+            + ", ".join(invalid_kinds)
+        )
+
+    if not isinstance(payload["reasoning_summary"], str):
+        raise ValueError("Structured RCA reasoning_summary must be a string")
+
+    return payload
+
+
+def _make_provider_context(incident: Incident, context: dict[str, Any] | None) -> Any:
     from backend.interfaces.common import ProviderContext
+
     ctx = context or {}
     return ProviderContext(
         correlation_id=incident.correlation_id,

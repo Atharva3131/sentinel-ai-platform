@@ -17,11 +17,18 @@ WORKDIR /app
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --chown=sentinel:sentinel pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+
+# ACR builds can have intermittent or slow access to files.pythonhosted.org.
+# Keep the lockfile authoritative, but allow package downloads more time to
+# complete before failing the remote build.
+ARG UV_HTTP_TIMEOUT=120
+RUN UV_HTTP_TIMEOUT="$UV_HTTP_TIMEOUT" \
+    uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=sentinel:sentinel backend ./backend
 COPY --chown=sentinel:sentinel main.py alembic.ini ./
-RUN uv sync --frozen --no-dev
+RUN UV_HTTP_TIMEOUT="$UV_HTTP_TIMEOUT" \
+    uv sync --frozen --no-dev
 
 USER sentinel
 

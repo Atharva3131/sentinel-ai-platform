@@ -37,6 +37,7 @@ from backend.interfaces.llm import (
     LLMProvider,
     LLMRateLimitError,
     LLMRequest,
+    LLMStructuredOutputError,
     LLMTimeoutError,
     LLMToolDefinition,
     LLMUnavailableError,
@@ -75,6 +76,7 @@ def _req(
 
 def _sarvam_settings(name: LLMProviderName = LLMProviderName.SARVAM) -> LLMProviderSettings:
     from pydantic import SecretStr
+
     return LLMProviderSettings(
         name=name,
         api_key=SecretStr("test-key"),
@@ -87,6 +89,7 @@ def _sarvam_settings(name: LLMProviderName = LLMProviderName.SARVAM) -> LLMProvi
 
 def _mistral_settings() -> LLMProviderSettings:
     from pydantic import SecretStr
+
     return LLMProviderSettings(
         name=LLMProviderName.MISTRAL,
         api_key=SecretStr("test-key-mistral"),
@@ -200,9 +203,7 @@ def _adapter_with_transport(
 
 def test_factory_builds_fake_provider_when_configured() -> None:
     """build_llm_provider returns FakeLLMProvider for name=fake."""
-    settings = LLMSettings(
-        primary=LLMProviderSettings(name=LLMProviderName.FAKE)
-    )
+    settings = LLMSettings(primary=LLMProviderSettings(name=LLMProviderName.FAKE))
     provider = build_llm_provider(settings)
     assert isinstance(provider, FakeLLMProvider)
 
@@ -337,23 +338,22 @@ async def test_adapter_parses_structured_json_response() -> None:
     transport = _MockTransport(200, _ok_response(json.dumps(output)))
     adapter = _adapter_with_transport(transport)
 
-    response = await adapter.generate(
-        _req(structured_schema={"type": "object"})
-    )
+    response = await adapter.generate(_req(structured_schema={"type": "object"}))
 
     assert response.structured_output == output
     assert response.is_structured
 
 
 @pytest.mark.asyncio
-async def test_adapter_wraps_non_json_in_content_key_for_structured() -> None:
-    """Adapter wraps non-JSON text in {content: ...} when schema is set."""
+async def test_adapter_rejects_non_json_structured_response() -> None:
+    """Adapter rejects non-JSON text instead of fabricating structured output."""
     transport = _MockTransport(200, _ok_response("not json"))
     adapter = _adapter_with_transport(transport)
 
-    response = await adapter.generate(_req(structured_schema={"type": "object"}))
+    with pytest.raises(LLMStructuredOutputError) as exc_info:
+        await adapter.generate(_req(structured_schema={"type": "object"}))
 
-    assert response.structured_output == {"content": "not json"}
+    assert exc_info.value.raw_content == "not json"
 
 
 @pytest.mark.asyncio
@@ -362,9 +362,7 @@ async def test_adapter_payload_includes_response_format_for_schema() -> None:
     captured: dict[str, Any] = {}
 
     class _CapturingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(
-            self, request: httpx.Request
-        ) -> httpx.Response:
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             captured["body"] = json.loads(request.content)
             return httpx.Response(
                 200,
@@ -379,6 +377,7 @@ async def test_adapter_payload_includes_response_format_for_schema() -> None:
     rf = captured["body"].get("response_format", {})
     assert rf.get("type") == "json_schema"
     assert rf["json_schema"]["schema"] == schema
+    assert captured["body"]["reasoning_effort"] is None
 
 
 # ── 4. Tool calls ─────────────────────────────────────────────────────────
@@ -488,13 +487,13 @@ async def test_adapter_respects_per_request_timeout() -> None:
 @pytest.mark.asyncio
 async def test_adapter_retries_on_503_and_succeeds() -> None:
     """Adapter retries transient 503 and returns 200 on second attempt."""
-    transport = _SequenceTransport([
-        (503, {"error": "temporary unavailable"}),
-        (200, _ok_response("Retry succeeded")),
-    ])
-    adapter = _adapter_with_transport(
-        transport, max_retries=2, retry_min=0.01, retry_max=0.05
+    transport = _SequenceTransport(
+        [
+            (503, {"error": "temporary unavailable"}),
+            (200, _ok_response("Retry succeeded")),
+        ]
     )
+    adapter = _adapter_with_transport(transport, max_retries=2, retry_min=0.01, retry_max=0.05)
 
     response = await adapter.generate(_req())
 
@@ -504,14 +503,14 @@ async def test_adapter_retries_on_503_and_succeeds() -> None:
 @pytest.mark.asyncio
 async def test_adapter_raises_after_max_retries_exhausted() -> None:
     """Adapter raises LLMUnavailableError after all retry attempts fail."""
-    transport = _SequenceTransport([
-        (503, {"error": "down"}),
-        (503, {"error": "down"}),
-        (503, {"error": "down"}),
-    ])
-    adapter = _adapter_with_transport(
-        transport, max_retries=2, retry_min=0.01, retry_max=0.05
+    transport = _SequenceTransport(
+        [
+            (503, {"error": "down"}),
+            (503, {"error": "down"}),
+            (503, {"error": "down"}),
+        ]
     )
+    adapter = _adapter_with_transport(transport, max_retries=2, retry_min=0.01, retry_max=0.05)
 
     with pytest.raises(LLMUnavailableError):
         await adapter.generate(_req())
@@ -539,9 +538,7 @@ async def test_adapter_retries_rate_limit_with_retry_after() -> None:
                 content=json.dumps(_ok_response("After rate limit")).encode(),
             )
 
-    adapter = _adapter_with_transport(
-        _RateLimitThenOKTransport(), max_retries=2, retry_min=0.01
-    )
+    adapter = _adapter_with_transport(_RateLimitThenOKTransport(), max_retries=2, retry_min=0.01)
 
     response = await adapter.generate(_req())
     assert response.content == "After rate limit"
@@ -584,9 +581,7 @@ async def test_adapter_raises_cancelled_during_retry_when_token_set() -> None:
                 content=b'{"error": "down"}',
             )
 
-    adapter = _adapter_with_transport(
-        _FailOnce(), max_retries=3, retry_min=0.01
-    )
+    adapter = _adapter_with_transport(_FailOnce(), max_retries=3, retry_min=0.01)
 
     with pytest.raises((LLMCancelledError, LLMUnavailableError)):
         await adapter.generate(_req(cancellation_token=_FlipToken()))
@@ -606,9 +601,7 @@ async def test_adapter_maps_401_to_invalid_request() -> None:
 
 @pytest.mark.asyncio
 async def test_adapter_maps_400_to_invalid_request() -> None:
-    transport = _MockTransport(
-        400, {"error": {"message": "context_length_exceeded"}}
-    )
+    transport = _MockTransport(400, {"error": {"message": "context_length_exceeded"}})
     adapter = _adapter_with_transport(transport, max_retries=0)
 
     with pytest.raises(LLMInvalidRequestError):
@@ -641,9 +634,7 @@ async def test_adapter_maps_connect_error_to_unavailable() -> None:
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("Connection refused")
 
-    adapter = _adapter_with_transport(
-        _ConnectFailTransport(), max_retries=0
-    )
+    adapter = _adapter_with_transport(_ConnectFailTransport(), max_retries=0)
 
     with pytest.raises(LLMUnavailableError):
         await adapter.generate(_req())
@@ -657,9 +648,7 @@ async def test_fallback_provider_routes_to_fallback_on_unavailable() -> None:
     """FallbackLLMProvider delegates to fallback when primary is unavailable."""
     from backend.interfaces.fake_llm import FailingFakeLLM
 
-    primary = FailingFakeLLM(
-        error=LLMUnavailableError("primary down", provider="primary")
-    )
+    primary = FailingFakeLLM(error=LLMUnavailableError("primary down", provider="primary"))
     fallback = FakeLLMProvider(responses=["fallback answer"])
     provider = FallbackLLMProvider(primary=primary, fallback=fallback)
 
@@ -672,9 +661,7 @@ async def test_fallback_provider_does_not_route_on_rate_limit() -> None:
     """FallbackLLMProvider does NOT fall back on LLMRateLimitError."""
     from backend.interfaces.fake_llm import FailingFakeLLM
 
-    primary = FailingFakeLLM(
-        error=LLMRateLimitError("rate limited", provider="primary")
-    )
+    primary = FailingFakeLLM(error=LLMRateLimitError("rate limited", provider="primary"))
     fallback = FakeLLMProvider(responses=["should not be called"])
     provider = FallbackLLMProvider(primary=primary, fallback=fallback)
 
@@ -687,9 +674,7 @@ async def test_fallback_provider_propagates_when_no_fallback_configured() -> Non
     """FallbackLLMProvider propagates the primary error when fallback is None."""
     from backend.interfaces.fake_llm import FailingFakeLLM
 
-    primary = FailingFakeLLM(
-        error=LLMUnavailableError("down", provider="primary")
-    )
+    primary = FailingFakeLLM(error=LLMUnavailableError("down", provider="primary"))
     provider = FallbackLLMProvider(primary=primary, fallback=None)
 
     with pytest.raises(LLMUnavailableError):

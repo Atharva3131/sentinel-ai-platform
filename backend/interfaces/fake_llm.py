@@ -59,7 +59,7 @@ class FakeLLMProvider:
             try:
                 structured = json.loads(content)
             except (json.JSONDecodeError, ValueError):
-                structured = {"content": content}
+                structured = None
 
         return LLMResponse(
             content=content,
@@ -146,7 +146,7 @@ class ToolCallFakeLLM:
                 try:
                     structured = json.loads(final_content)
                 except (json.JSONDecodeError, ValueError):
-                    structured = {"content": final_content}
+                    structured = None
             return LLMResponse(
                 content=final_content,
                 model="tool-fake-model",
@@ -164,6 +164,7 @@ class FailingFakeLLM:
 
     def __init__(self, error: LLMError | None = None) -> None:
         from backend.interfaces.llm import LLMUnavailableError
+
         self._error = error or LLMUnavailableError(
             "Fake provider is unavailable", provider="failing-fake-llm"
         )

@@ -80,15 +80,17 @@ def _rca_output_json(
     evidence_ids: list[str] | None = None,
     root_cause: str = "Deployment regression",
 ) -> str:
-    return json.dumps({
-        "root_cause_title": root_cause,
-        "root_cause_description": "A recent deployment introduced a regression.",
-        "confidence": confidence,
-        "supporting_evidence_ids": evidence_ids or [],
-        "contradicting_evidence_ids": [],
-        "missing_evidence": [],
-        "reasoning_summary": "Evidence points to a recent deployment.",
-    })
+    return json.dumps(
+        {
+            "root_cause_title": root_cause,
+            "root_cause_description": "A recent deployment introduced a regression.",
+            "confidence": confidence,
+            "supporting_evidence_ids": evidence_ids or [],
+            "contradicting_evidence_ids": [],
+            "missing_evidence": [],
+            "reasoning_summary": "Evidence points to a recent deployment.",
+        }
+    )
 
 
 # ── 13. Deterministic agent ─────────────────────────────────────────────────
@@ -101,9 +103,10 @@ async def test_deterministic_agent_produces_rca() -> None:
     gen = DeterministicHypothesisGenerator()
     engine = HypothesisEngine(generator=gen)
     orchestrator = EvidenceOrchestrator(
-        providers=[FakeMetricsProvider(), FakeDeploymentProvider(
-            deployments=[{"service": "api-gw", "version": "v2.0"}]
-        )]
+        providers=[
+            FakeMetricsProvider(),
+            FakeDeploymentProvider(deployments=[{"service": "api-gw", "version": "v2.0"}]),
+        ]
     )
     tool = EvidenceRequestTool(orchestrator=orchestrator)
     agent = DeterministicInvestigationAgent(
@@ -168,12 +171,81 @@ async def test_llm_agent_produces_rca_from_structured_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_agent_retries_malformed_json_and_accepts_valid_rca() -> None:
+    """Malformed structured output is retried and never treated as an RCA."""
+    inc = _incident()
+    collection = _empty_collection(inc.incident_id)
+    normalizer = EvidenceNormalizer()
+    normalized = normalizer.normalize_collection(collection)
+    valid = _rca_output_json(confidence=0.82)
+
+    fake_llm = FakeLLMProvider(responses=["not json", valid])
+    agent = LLMInvestigationAgent(
+        llm_provider=fake_llm,
+        max_tool_rounds=0,
+        structured_retry_attempts=2,
+    )
+
+    output = await agent.investigate(inc, collection, normalized)
+
+    assert output.rca.root_cause is not None
+    assert output.rca.confidence == 0.82
+    assert fake_llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_retries_missing_required_rca_fields() -> None:
+    """A JSON object missing RCA fields is rejected before domain conversion."""
+    inc = _incident()
+    collection = _empty_collection(inc.incident_id)
+    normalizer = EvidenceNormalizer()
+    normalized = normalizer.normalize_collection(collection)
+    incomplete = json.dumps({"root_cause_title": "Missing fields"})
+    valid = _rca_output_json(confidence=0.81)
+
+    fake_llm = FakeLLMProvider(responses=[incomplete, valid])
+    agent = LLMInvestigationAgent(
+        llm_provider=fake_llm,
+        max_tool_rounds=0,
+        structured_retry_attempts=2,
+    )
+
+    output = await agent.investigate(inc, collection, normalized)
+
+    assert output.rca.root_cause is not None
+    assert output.rca.confidence == 0.81
+    assert fake_llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_returns_explicit_inconclusive_after_retry_exhaustion() -> None:
+    """Exhausted structured retries produce no fabricated RCA fields."""
+    inc = _incident()
+    collection = _empty_collection(inc.incident_id)
+    normalizer = EvidenceNormalizer()
+    normalized = normalizer.normalize_collection(collection)
+
+    fake_llm = FakeLLMProvider(responses=["not json"])
+    agent = LLMInvestigationAgent(
+        llm_provider=fake_llm,
+        max_tool_rounds=0,
+        structured_retry_attempts=2,
+    )
+
+    output = await agent.investigate(inc, collection, normalized)
+
+    assert output.rca.root_cause is None
+    assert output.rca.confidence == 0.0
+    assert output.rca.unresolved_uncertainty is not None
+    assert "Structured RCA unavailable" in output.rca.unresolved_uncertainty
+    assert fake_llm.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_llm_agent_with_tool_calls_requests_evidence() -> None:
     """LLMInvestigationAgent executes tool calls and collects additional evidence."""
     inc = _incident()
-    orchestrator = EvidenceOrchestrator(
-        providers=[FakeMetricsProvider(), FakeLogsProvider()]
-    )
+    orchestrator = EvidenceOrchestrator(providers=[FakeMetricsProvider(), FakeLogsProvider()])
     ev_result = await orchestrator.collect(inc, source_kinds={EvidenceSourceKind.METRICS})
     tool = EvidenceRequestTool(orchestrator=orchestrator)
 
@@ -214,9 +286,7 @@ async def test_llm_agent_falls_back_when_provider_unavailable() -> None:
     normalizer = EvidenceNormalizer()
     normalized = normalizer.normalize_collection(collection)
 
-    fake_llm = FailingFakeLLM(
-        error=LLMUnavailableError("provider down", provider="fake")
-    )
+    fake_llm = FailingFakeLLM(error=LLMUnavailableError("provider down", provider="fake"))
     agent = LLMInvestigationAgent(llm_provider=fake_llm, max_tool_rounds=1)
 
     output = await agent.investigate(inc, collection, normalized)
@@ -242,7 +312,9 @@ async def test_llm_agent_respects_cancellation() -> None:
     agent = LLMInvestigationAgent(llm_provider=fake_llm, max_tool_rounds=1)
 
     output = await agent.investigate(
-        inc, collection, normalized,
+        inc,
+        collection,
+        normalized,
         context={"cancellation_token": _Cancelled()},
     )
 
@@ -278,9 +350,7 @@ async def test_investigation_orchestrator_delegates_to_llm_agent() -> None:
     """The production-capable orchestrator path uses the configured LLM agent."""
     inc = _incident()
     evidence_orchestrator = EvidenceOrchestrator(providers=[FakeMetricsProvider()])
-    fake_llm = FakeLLMProvider(
-        responses=[_rca_output_json(root_cause="LLM-selected cause")]
-    )
+    fake_llm = FakeLLMProvider(responses=[_rca_output_json(root_cause="LLM-selected cause")])
     llm_agent = LLMInvestigationAgent(
         llm_provider=fake_llm,
         evidence_tool=None,
@@ -288,9 +358,7 @@ async def test_investigation_orchestrator_delegates_to_llm_agent() -> None:
     )
     investigation = InvestigationOrchestrator(
         evidence_orchestrator=evidence_orchestrator,
-        hypothesis_engine=HypothesisEngine(
-            generator=DeterministicHypothesisGenerator()
-        ),
+        hypothesis_engine=HypothesisEngine(generator=DeterministicHypothesisGenerator()),
         investigation_agent=llm_agent,
         max_iterations=1,
         confidence_threshold=0.0,
@@ -316,9 +384,7 @@ async def test_grounding_validator_strips_hallucinated_ids() -> None:
     validator = EvidenceGroundingValidator()
     mixed = [*real_ids[:1], "HALLUCINATED-ID-1", "HALLUCINATED-ID-2"]
 
-    grounded = validator.validate(
-        mixed, ev_result.collection, incident_id=inc.incident_id
-    )
+    grounded = validator.validate(mixed, ev_result.collection, incident_id=inc.incident_id)
 
     assert "HALLUCINATED-ID-1" not in grounded
     assert "HALLUCINATED-ID-2" not in grounded
@@ -344,15 +410,17 @@ async def test_llm_agent_strips_hallucinated_ids_from_rca() -> None:
     ev_result = await orchestrator.collect(inc)
     real_id = ev_result.collection.items[0].evidence_id if ev_result.collection.items else "real"
 
-    rca_with_hallucination = json.dumps({
-        "root_cause_title": "Real cause",
-        "root_cause_description": "desc",
-        "confidence": 0.9,
-        "supporting_evidence_ids": [real_id, "FAKE-ID-99", "MADE-UP-ID"],
-        "contradicting_evidence_ids": [],
-        "missing_evidence": [],
-        "reasoning_summary": "test",
-    })
+    rca_with_hallucination = json.dumps(
+        {
+            "root_cause_title": "Real cause",
+            "root_cause_description": "desc",
+            "confidence": 0.9,
+            "supporting_evidence_ids": [real_id, "FAKE-ID-99", "MADE-UP-ID"],
+            "contradicting_evidence_ids": [],
+            "missing_evidence": [],
+            "reasoning_summary": "test",
+        }
+    )
     fake_llm = FakeLLMProvider(responses=[rca_with_hallucination])
     agent = LLMInvestigationAgent(llm_provider=fake_llm, max_tool_rounds=0)
     normalizer = EvidenceNormalizer()
@@ -400,15 +468,17 @@ async def test_llm_agent_reports_missing_evidence_categories() -> None:
     normalizer = EvidenceNormalizer()
     normalized = normalizer.normalize_collection(collection)
 
-    rca_with_missing = json.dumps({
-        "root_cause_title": "Unknown",
-        "root_cause_description": "Not enough info.",
-        "confidence": 0.30,
-        "supporting_evidence_ids": [],
-        "contradicting_evidence_ids": [],
-        "missing_evidence": ["metrics", "logs", "deployments"],
-        "reasoning_summary": "Need more evidence.",
-    })
+    rca_with_missing = json.dumps(
+        {
+            "root_cause_title": "Unknown",
+            "root_cause_description": "Not enough info.",
+            "confidence": 0.30,
+            "supporting_evidence_ids": [],
+            "contradicting_evidence_ids": [],
+            "missing_evidence": ["metrics", "logs", "deployments"],
+            "reasoning_summary": "Need more evidence.",
+        }
+    )
     fake_llm = FakeLLMProvider(responses=[rca_with_missing])
     agent = LLMInvestigationAgent(
         llm_provider=fake_llm,
