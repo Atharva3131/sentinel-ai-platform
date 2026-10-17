@@ -89,9 +89,7 @@ class KeyVaultSettings(BaseModel):
     @model_validator(mode="after")
     def validate_enabled(self) -> Self:
         if self.enabled and not self.url:
-            raise ValueError(
-                "key_vault.url must be configured when Key Vault is enabled"
-            )
+            raise ValueError("key_vault.url must be configured when Key Vault is enabled")
         return self
 
 
@@ -190,9 +188,7 @@ class CosmosSettings(BaseModel):
     def validate_configuration(self) -> Self:
         """Require either a connection string or endpoint when Cosmos is enabled."""
         if self.enabled and not self.connection_string and not self.endpoint:
-            raise ValueError(
-                "cosmos requires connection_string or endpoint when enabled"
-            )
+            raise ValueError("cosmos requires connection_string or endpoint when enabled")
         return self
 
 
@@ -208,9 +204,7 @@ class BlobStorageSettings(BaseModel):
     def validate_configuration(self) -> Self:
         """Require either a connection string or account URL when enabled."""
         if self.enabled and not self.connection_string and not self.account_url:
-            raise ValueError(
-                "blob requires connection_string or account_url when enabled"
-            )
+            raise ValueError("blob requires connection_string or account_url when enabled")
         return self
 
 
@@ -304,9 +298,7 @@ class RemediationSettings(BaseModel):
 
     auto_approve_high_risk: bool = Field(
         default=False,
-        description=(
-            "Auto-approve HIGH-risk remediation actions without human approval"
-        ),
+        description=("Auto-approve HIGH-risk remediation actions without human approval"),
     )
 
 
@@ -381,15 +373,9 @@ class EvidenceSettings(BaseModel):
         SENTINEL_EVIDENCE__TRACES__BASE_URL=http://jaeger:16686
     """
 
-    metrics: EvidenceProviderSettings = Field(
-        default_factory=EvidenceProviderSettings
-    )
-    logs: EvidenceProviderSettings = Field(
-        default_factory=EvidenceProviderSettings
-    )
-    traces: EvidenceProviderSettings = Field(
-        default_factory=EvidenceProviderSettings
-    )
+    metrics: EvidenceProviderSettings = Field(default_factory=EvidenceProviderSettings)
+    logs: EvidenceProviderSettings = Field(default_factory=EvidenceProviderSettings)
+    traces: EvidenceProviderSettings = Field(default_factory=EvidenceProviderSettings)
 
 
 class LLMProviderName(StrEnum):
@@ -418,9 +404,7 @@ class LLMProviderSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM provider configuration — primary and optional fallback."""
 
-    primary: LLMProviderSettings = Field(
-        default_factory=LLMProviderSettings
-    )
+    primary: LLMProviderSettings = Field(default_factory=LLMProviderSettings)
     fallback: LLMProviderSettings | None = None
     enable_fallback: bool = True
 
@@ -456,6 +440,23 @@ class AzureRemediationSettings(BaseModel):
     )
 
 
+class Demo1Settings(BaseModel):
+    """Safe integration settings for the external Demo 1 Order API.
+
+    Demo 1 incidents are observe-only by design.  The strict incident
+    predicate lives in ``backend.services.demo1``; these settings only control
+    whether the optional HTTP evidence adapter is enabled and where it reads
+    the Order API from.
+    """
+
+    enabled: bool = True
+    base_url: str = ""
+    timeout_seconds: float = Field(default=10.0, gt=0.0)
+    max_retries: int = Field(default=1, ge=0)
+    retry_min_wait_seconds: float = Field(default=0.25, gt=0.0)
+    retry_max_wait_seconds: float = Field(default=2.0, gt=0.0)
+
+
 class AppSettings(BaseSettings):
     """Root application settings from environment variables and secret files."""
 
@@ -474,11 +475,15 @@ class AppSettings(BaseSettings):
     environment: DeploymentEnvironment = DeploymentEnvironment.DEVELOPMENT
     debug: bool = False
     api_prefix: str = "/api/v1"
+    # Dedicated credential for incident ingestion callers. This is separate
+    # from all provider credentials and is intentionally not given a default.
+    incident_api_key: SecretStr | None = Field(
+        default=None,
+        description="Shared API key required by POST /api/v1/incidents.",
+    )
     server: ServerSettings = Field(default_factory=ServerSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
-    opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=OpenTelemetrySettings
-    )
+    opentelemetry: OpenTelemetrySettings = Field(default_factory=OpenTelemetrySettings)
     azure: AzureCredentialSettings = Field(default_factory=AzureCredentialSettings)
     key_vault: KeyVaultSettings = Field(default_factory=KeyVaultSettings)
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
@@ -496,9 +501,8 @@ class AppSettings(BaseSettings):
     azure_monitor_metrics: AzureMonitorMetricsSettings = Field(
         default_factory=AzureMonitorMetricsSettings
     )
-    azure_remediation: AzureRemediationSettings = Field(
-        default_factory=AzureRemediationSettings
-    )
+    azure_remediation: AzureRemediationSettings = Field(default_factory=AzureRemediationSettings)
+    demo1: Demo1Settings = Field(default_factory=Demo1Settings)
 
     @classmethod
     def settings_customise_sources(
@@ -559,19 +563,13 @@ class DevelopmentSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[
-        DeploymentEnvironment.DEVELOPMENT
-    ] = DeploymentEnvironment.DEVELOPMENT
+    environment: Literal[DeploymentEnvironment.DEVELOPMENT] = DeploymentEnvironment.DEVELOPMENT
     debug: bool = True
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(
-            level="DEBUG", json_output=False
-        )
+        default_factory=lambda: LoggingSettings(level="DEBUG", json_output=False)
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(
-            enabled=True, trace_sample_ratio=1.0
-        )
+        default_factory=lambda: OpenTelemetrySettings(enabled=True, trace_sample_ratio=1.0)
     )
 
 
@@ -580,29 +578,17 @@ class TestingSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[
-        DeploymentEnvironment.TESTING
-    ] = DeploymentEnvironment.TESTING
+    environment: Literal[DeploymentEnvironment.TESTING] = DeploymentEnvironment.TESTING
     debug: bool = False
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(
-            level="WARNING", json_output=False
-        )
+        default_factory=lambda: LoggingSettings(level="WARNING", json_output=False)
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(
-            enabled=False, trace_sample_ratio=0.0
-        )
+        default_factory=lambda: OpenTelemetrySettings(enabled=False, trace_sample_ratio=0.0)
     )
-    neo4j: Neo4jSettings = Field(
-        default_factory=lambda: Neo4jSettings(enabled=False)
-    )
-    cosmos: CosmosSettings = Field(
-        default_factory=lambda: CosmosSettings(enabled=False)
-    )
-    blob: BlobStorageSettings = Field(
-        default_factory=lambda: BlobStorageSettings(enabled=False)
-    )
+    neo4j: Neo4jSettings = Field(default_factory=lambda: Neo4jSettings(enabled=False))
+    cosmos: CosmosSettings = Field(default_factory=lambda: CosmosSettings(enabled=False))
+    blob: BlobStorageSettings = Field(default_factory=lambda: BlobStorageSettings(enabled=False))
 
 
 class ProductionSettings(AppSettings):
@@ -610,19 +596,13 @@ class ProductionSettings(AppSettings):
 
     __test__ = False
 
-    environment: Literal[
-        DeploymentEnvironment.PRODUCTION
-    ] = DeploymentEnvironment.PRODUCTION
+    environment: Literal[DeploymentEnvironment.PRODUCTION] = DeploymentEnvironment.PRODUCTION
     debug: bool = False
     logging: LoggingSettings = Field(
-        default_factory=lambda: LoggingSettings(
-            level="INFO", json_output=True
-        )
+        default_factory=lambda: LoggingSettings(level="INFO", json_output=True)
     )
     opentelemetry: OpenTelemetrySettings = Field(
-        default_factory=lambda: OpenTelemetrySettings(
-            enabled=True, trace_sample_ratio=0.1
-        )
+        default_factory=lambda: OpenTelemetrySettings(enabled=True, trace_sample_ratio=0.1)
     )
 
 

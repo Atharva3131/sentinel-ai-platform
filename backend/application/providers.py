@@ -49,12 +49,14 @@ from backend.infrastructure.neo4j_repository import Neo4jRepositoryBase
 from backend.infrastructure.redis import RedisConnection
 from backend.interfaces.deployment import DeploymentProvider
 from backend.interfaces.evidence import (
+    EvidenceProvider,
     LogsEvidenceProvider,
     MetricsEvidenceProvider,
     TracesEvidenceProvider,
 )
 from backend.interfaces.llm import LLMProvider
 from backend.policies.action_policy import RemediationPolicyEngine
+from backend.providers.evidence.demo1 import Demo1EvidenceProvider
 from backend.providers.evidence.factory import (
     build_logs_provider,
     build_metrics_provider,
@@ -157,15 +159,21 @@ class ApplicationProvider(Provider):
         return build_traces_provider(settings.evidence)
 
     @provide(scope=Scope.APP)
+    def demo1_evidence_provider(self, settings: AppSettings) -> EvidenceProvider:
+        """Return the optional Demo 1 health/metrics evidence adapter."""
+        return Demo1EvidenceProvider.from_settings(settings.demo1)
+
+    @provide(scope=Scope.APP)
     def evidence_orchestrator(
         self,
         metrics: MetricsEvidenceProvider,
         logs: LogsEvidenceProvider,
         traces: TracesEvidenceProvider,
+        demo1: EvidenceProvider,
     ) -> EvidenceOrchestrator:
         """Return an EvidenceOrchestrator pre-wired with all three providers."""
         return EvidenceOrchestrator(
-            providers=[metrics, logs, traces],
+            providers=[metrics, logs, traces, demo1],
         )
 
     @provide(scope=Scope.APP)
@@ -349,23 +357,21 @@ class ApplicationProvider(Provider):
     @provide(scope=Scope.APP)
     def remediation_policy_engine(self, settings: AppSettings) -> RemediationPolicyEngine:
         """Return a RemediationPolicyEngine with optionally auto-approved HIGH-risk actions.
-        
+
         When settings.remediation.auto_approve_high_risk is True, HIGH-risk actions
         are auto-approved without human review (demo/autonomous mode).
         """
         from backend.models.remediation import ActionRiskLevel
         from backend.policies.action_policy import ActionPolicy
-        
+
         # Build auto-approve levels based on configuration
         auto_approve_levels = {ActionRiskLevel.LOW, ActionRiskLevel.MEDIUM}
         if settings.remediation.auto_approve_high_risk:
             auto_approve_levels.add(ActionRiskLevel.HIGH)
-        
+
         # Create policy with appropriate risk approval levels
-        policy = ActionPolicy(
-            auto_approve_risk_levels=frozenset(auto_approve_levels)
-        )
-        
+        policy = ActionPolicy(auto_approve_risk_levels=frozenset(auto_approve_levels))
+
         return RemediationPolicyEngine(policy=policy)
 
     # ── Hypothesis engine ─────────────────────────────────────────────────
@@ -487,9 +493,7 @@ class ApplicationProvider(Provider):
     # ── Azure Monitor Metrics settings ────────────────────────────────────
 
     @provide(scope=Scope.APP)
-    def azure_monitor_metrics_settings(
-        self, settings: AppSettings
-    ) -> AzureMonitorMetricsSettings:
+    def azure_monitor_metrics_settings(self, settings: AppSettings) -> AzureMonitorMetricsSettings:
         return settings.azure_monitor_metrics
 
     # ── MetricsSnapshotPort (AzureMonitorMetricsSnapshot) ─────────────────
@@ -520,23 +524,20 @@ class ApplicationProvider(Provider):
 
         azure_cfg = app_settings.azure
         if azure_cfg.authentication_mode == "client_secret":
-            credential: DefaultAzureCredential | ClientSecretCredential = (
-                ClientSecretCredential(
-                    tenant_id=azure_cfg.tenant_id or "",
-                    client_id=azure_cfg.client_id or "",
-                    client_secret=(
-                        azure_cfg.client_secret.get_secret_value()
-                        if azure_cfg.client_secret is not None else ""
-                    ),
-                )
+            credential: DefaultAzureCredential | ClientSecretCredential = ClientSecretCredential(
+                tenant_id=azure_cfg.tenant_id or "",
+                client_id=azure_cfg.client_id or "",
+                client_secret=(
+                    azure_cfg.client_secret.get_secret_value()
+                    if azure_cfg.client_secret is not None
+                    else ""
+                ),
             )
         else:
             credential = DefaultAzureCredential(
                 managed_identity_client_id=azure_cfg.managed_identity_client_id,
                 exclude_environment_credential=azure_cfg.exclude_environment_credential,
-                exclude_managed_identity_credential=(
-                    azure_cfg.exclude_managed_identity_credential
-                ),
+                exclude_managed_identity_credential=(azure_cfg.exclude_managed_identity_credential),
             )
 
         return AzureMonitorMetricsSnapshot.from_settings(az_settings, credential)
@@ -586,6 +587,7 @@ class ApplicationProvider(Provider):
             return None
 
         from backend.services.azure_remediation import AzureRemediationService
+
         return AzureRemediationService(settings.azure_remediation)
 
     # ── ClosedLoopOrchestrator ────────────────────────────────────────────

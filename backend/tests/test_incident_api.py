@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 from dishka import Provider, Scope, provide
+from pydantic import SecretStr
 
 from backend.application.factory import create_application
 from backend.configuration.settings import AppSettings, OpenTelemetrySettings
@@ -47,6 +48,7 @@ class _InMemoryAdapter(PostgreSQLIncidentRepository):
         inc = await self._store.get(incident_id)
         if inc is None:
             from backend.db.repositories.incident import IncidentNotFoundError
+
             raise IncidentNotFoundError(incident_id)
         return inc
 
@@ -69,7 +71,7 @@ class _InMemoryAdapter(PostgreSQLIncidentRepository):
             all_inc = [i for i in all_inc if i.status.value == status]
         if severity:
             all_inc = [i for i in all_inc if i.severity.value == severity]
-        return all_inc[offset: offset + limit]
+        return all_inc[offset : offset + limit]
 
 
 # ── DI override ────────────────────────────────────────────────────────────
@@ -108,12 +110,21 @@ class _MemoryRepoProvider(Provider):
         return _NoOpOrchestrator()  # type: ignore[return-value]
 
 
+_INCIDENT_API_KEY = "test-incident-key"
+
+
 def _test_settings() -> AppSettings:
     return AppSettings(
         environment="testing",
+        incident_api_key=SecretStr(_INCIDENT_API_KEY),
+        key_vault={"enabled": False},
         neo4j={"enabled": False},
         opentelemetry=OpenTelemetrySettings(enabled=False),
     )
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"X-Sentinel-Incident-Key": _INCIDENT_API_KEY}
 
 
 def _valid_body(**overrides: Any) -> dict[str, Any]:
@@ -134,6 +145,54 @@ def _valid_body(**overrides: Any) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_post_incident_rejects_missing_api_key() -> None:
+    override = _MemoryRepoProvider()
+    app = create_application(_test_settings(), override_providers=(override,))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/v1/incidents", json=_valid_body())
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "ApiKey"
+
+
+@pytest.mark.asyncio
+async def test_post_incident_rejects_invalid_api_key() -> None:
+    override = _MemoryRepoProvider()
+    app = create_application(_test_settings(), override_providers=(override,))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/incidents",
+                json=_valid_body(),
+                headers={"X-Sentinel-Incident-Key": "wrong-key"},
+            )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_post_incident_accepts_valid_api_key() -> None:
+    override = _MemoryRepoProvider()
+    app = create_application(_test_settings(), override_providers=(override,))
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/incidents",
+                json=_valid_body(),
+                headers=_auth_headers(),
+            )
+
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
 async def test_post_incident_returns_201_and_incident_id() -> None:
     """POST /api/v1/incidents creates an incident and returns 201."""
     override = _MemoryRepoProvider()
@@ -142,7 +201,9 @@ async def test_post_incident_returns_201_and_incident_id() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/api/v1/incidents", json=_valid_body())
+            response = await client.post(
+                "/api/v1/incidents", json=_valid_body(), headers=_auth_headers()
+            )
 
     assert response.status_code == 201
     payload = response.json()
@@ -161,7 +222,9 @@ async def test_post_incident_assigns_incident_id_when_omitted() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/api/v1/incidents", json=_valid_body())
+            response = await client.post(
+                "/api/v1/incidents", json=_valid_body(), headers=_auth_headers()
+            )
 
     assert len(response.json()["incident"]["incident_id"]) > 0
 
@@ -176,7 +239,7 @@ async def test_post_incident_with_explicit_id_preserves_it() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/api/v1/incidents", json=body)
+            response = await client.post("/api/v1/incidents", json=body, headers=_auth_headers())
 
     assert response.json()["incident"]["incident_id"] == "custom-inc-001"
 
@@ -193,8 +256,8 @@ async def test_duplicate_incident_returns_is_duplicate_true() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            r1 = await client.post("/api/v1/incidents", json=body1)
-            r2 = await client.post("/api/v1/incidents", json=body2)
+            r1 = await client.post("/api/v1/incidents", json=body1, headers=_auth_headers())
+            r2 = await client.post("/api/v1/incidents", json=body2, headers=_auth_headers())
 
     assert r1.status_code == 201
     assert r2.json()["is_duplicate"] is True
@@ -214,7 +277,7 @@ async def test_get_incident_returns_created_incident() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            post_resp = await client.post("/api/v1/incidents", json=body)
+            post_resp = await client.post("/api/v1/incidents", json=body, headers=_auth_headers())
             assert post_resp.status_code == 201
             response = await client.get("/api/v1/incidents/get-test-001")
 
@@ -249,10 +312,12 @@ async def test_list_incidents_returns_created_incidents() -> None:
             await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(incident_id="list-001", correlation_id=str(uuid.uuid4())),
+                headers=_auth_headers(),
             )
             await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(incident_id="list-002", correlation_id=str(uuid.uuid4())),
+                headers=_auth_headers(),
             )
             response = await client.get("/api/v1/incidents")
 
@@ -277,6 +342,7 @@ async def test_list_incidents_respects_limit() -> None:
                         incident_id=f"lim-{i}",
                         correlation_id=str(uuid.uuid4()),
                     ),
+                    headers=_auth_headers(),
                 )
             response = await client.get("/api/v1/incidents?limit=1")
 
@@ -297,7 +363,7 @@ async def test_post_incident_missing_title_returns_422() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/api/v1/incidents", json=body)
+            response = await client.post("/api/v1/incidents", json=body, headers=_auth_headers())
 
     assert response.status_code == 422
 
@@ -314,6 +380,7 @@ async def test_post_incident_invalid_severity_returns_422() -> None:
             response = await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(severity="EXTREME"),
+                headers=_auth_headers(),
             )
 
     assert response.status_code == 422
@@ -331,6 +398,7 @@ async def test_post_incident_empty_affected_services_returns_422() -> None:
             response = await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(affected_services=[]),
+                headers=_auth_headers(),
             )
 
     assert response.status_code == 422
@@ -347,7 +415,7 @@ async def test_post_incident_missing_description_returns_422() -> None:
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/api/v1/incidents", json=body)
+            response = await client.post("/api/v1/incidents", json=body, headers=_auth_headers())
 
     assert response.status_code == 422
 
@@ -370,6 +438,7 @@ async def test_new_incident_invokes_closed_loop_orchestrator() -> None:
                     incident_id="clo-001",
                     correlation_id=str(uuid.uuid4()),
                 ),
+                headers=_auth_headers(),
             )
 
     assert response.status_code == 201
@@ -393,11 +462,13 @@ async def test_duplicate_incident_does_not_invoke_closed_loop_orchestrator() -> 
             r1 = await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(incident_id="dup-clo-001", correlation_id=corr_id),
+                headers=_auth_headers(),
             )
             # Second request — duplicate, orchestrator must NOT be invoked again
             r2 = await client.post(
                 "/api/v1/incidents",
                 json=_valid_body(incident_id="dup-clo-002", correlation_id=corr_id),
+                headers=_auth_headers(),
             )
 
     assert r1.status_code == 201
@@ -446,6 +517,7 @@ async def test_orchestration_failure_does_not_lose_incident() -> None:
                     incident_id="fail-clo-001",
                     correlation_id=str(uuid.uuid4()),
                 ),
+                headers=_auth_headers(),
             )
 
     # Despite orchestration failure, HTTP 201 is returned
@@ -474,6 +546,7 @@ async def test_di_container_resolves_request_scoped_closed_loop_orchestrator() -
                     incident_id="di-scope-001",
                     correlation_id=str(uuid.uuid4()),
                 ),
+                headers=_auth_headers(),
             )
             r2 = await client.post(
                 "/api/v1/incidents",
@@ -481,6 +554,7 @@ async def test_di_container_resolves_request_scoped_closed_loop_orchestrator() -
                     incident_id="di-scope-002",
                     correlation_id=str(uuid.uuid4()),
                 ),
+                headers=_auth_headers(),
             )
 
     assert r1.status_code == 201

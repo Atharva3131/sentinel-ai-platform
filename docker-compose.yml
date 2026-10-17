@@ -3,6 +3,7 @@ name: sentinel-ai-platform
 x-application-environment: &application-environment
   SENTINEL_ENVIRONMENT: development
   SENTINEL_DEBUG: "false"
+  SENTINEL_INCIDENT_API_KEY: ${SENTINEL_INCIDENT_API_KEY:-}
   SENTINEL_LOGGING__JSON_OUTPUT: "true"
   SENTINEL_OBSERVABILITY__ENABLED: "false"
   SENTINEL_POSTGRES__URL: postgresql+asyncpg://sentinel:sentinel-local@postgres:5432/sentinel

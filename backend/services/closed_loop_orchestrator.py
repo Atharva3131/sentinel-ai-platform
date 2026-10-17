@@ -37,18 +37,20 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
-from backend.core.remediation_engine import RemediationEngine
+from backend.core.remediation_engine import FakeActionExecutor, RemediationEngine
 from backend.core.validation_engine import ValidationEngine
 from backend.models.deployment import DeploymentResult
 from backend.models.incident import Incident, IncidentStatus
 from backend.models.resolution import IncidentResolution, ResolutionStatus
 from backend.models.validation import VerificationPlan
+from backend.providers.github.fake_deployment import FakeDeploymentProvider
+from backend.services.demo1 import is_demo1_incident
 from backend.services.deployment_pipeline import DeploymentPipeline, build_deployment_request
 from backend.services.incident_events import (
     INCIDENT_ESCALATED,
@@ -148,6 +150,8 @@ class ClosedLoopOrchestrator:
     deployment_repo: str = ""
     deployment_workflow: str = "deploy.yml"
     deployment_environment: str = "staging"
+    observe_only_executor: Any = field(default_factory=FakeActionExecutor)
+    observe_only_deployment_provider: Any = field(default_factory=FakeDeploymentProvider)
 
     async def run(
         self,
@@ -177,6 +181,23 @@ class ClosedLoopOrchestrator:
 
             last_outcome: VerificationOutcome | None = None
             last_deployment: DeploymentResult | None = None
+            demo1_observe_only = is_demo1_incident(incident)
+            active_remediation_engine = self.remediation_engine
+            active_deployment_pipeline = self.deployment_pipeline
+            active_azure_remediation_service = self.azure_remediation_service
+            if demo1_observe_only:
+                # Keep investigation, planning, and the real policy gateway,
+                # but replace only the side-effecting execution ports for this
+                # incident.  Verification is intentionally skipped below.
+                active_remediation_engine = replace(
+                    self.remediation_engine,
+                    executor=self.observe_only_executor,
+                )
+                active_deployment_pipeline = replace(
+                    self.deployment_pipeline,
+                    provider=self.observe_only_deployment_provider,
+                )
+                active_azure_remediation_service = None
 
             def _duration() -> float:
                 return (time.monotonic() - t0) * 1000
@@ -296,14 +317,12 @@ class ClosedLoopOrchestrator:
                 # ── Azure remediation (if wired and incident matches Demo 1 pattern) ──────
                 # This is an optional early-exit path for specific incidents that can be
                 # resolved by restarting a Container App and verifying health recovery.
-                if self.azure_remediation_service is not None:
-                    should_try_azure = await (
-                        self.azure_remediation_service.should_remediate(incident)
+                if active_azure_remediation_service is not None:
+                    should_try_azure = await active_azure_remediation_service.should_remediate(
+                        incident
                     )
                     if should_try_azure:
-                        azure_result = await (
-                            self.azure_remediation_service.remediate(incident)
-                        )
+                        azure_result = await active_azure_remediation_service.remediate(incident)
                         if azure_result.succeeded:
                             bound_log.info(
                                 "closed_loop_azure_remediation_succeeded",
@@ -339,12 +358,13 @@ class ClosedLoopOrchestrator:
                             rca_id=plan.rca_id,
                             action_count=plan.action_count,
                             stage_count=len(plan.stages),
-                            risk_levels=sorted({
-                                action.risk_level.value for action in plan.actions
-                            }),
+                            risk_levels=sorted(
+                                {action.risk_level.value for action in plan.actions}
+                            ),
                         )
-                        remediation_result = await self.remediation_engine.execute_plan(
-                            plan, incident,
+                        remediation_result = await active_remediation_engine.execute_plan(
+                            plan,
+                            incident,
                             correlation_id=incident.correlation_id,
                             context=context,
                         )
@@ -379,6 +399,7 @@ class ClosedLoopOrchestrator:
                                 ),
                             }
                             from dataclasses import replace as dc_replace
+
                             updated_incident = dc_replace(
                                 incident.with_status(IncidentStatus.ESCALATED),
                                 metadata=error_metadata,
@@ -394,16 +415,17 @@ class ClosedLoopOrchestrator:
                     except Exception as exc:
                         bound_log.error("remediation_failed", cycle=cycle, error=str(exc))
                         failure_reason = f"Remediation failed on cycle {cycle}: {exc}"
-                        
+
                         # Persist error metadata and ESCALATED status before returning
                         error_metadata = incident.metadata.copy() if incident.metadata else {}
                         error_metadata["closed_loop_failure_stage"] = "remediation"
                         error_metadata["closed_loop_failure_reason"] = str(exc)
-                        
+
                         updated_incident = incident.with_status(IncidentStatus.ESCALATED)
                         from dataclasses import replace as dc_replace
+
                         updated_incident = dc_replace(updated_incident, metadata=error_metadata)
-                        
+
                         try:
                             await self.repository.save(updated_incident)
                         except Exception as status_exc:
@@ -411,7 +433,7 @@ class ClosedLoopOrchestrator:
                                 "remediation_failure_status_persistence_failed",
                                 status_error=str(status_exc),
                             )
-                        
+
                         return _failed(failure_reason)
 
                 # ── Deployment ────────────────────────────────────────────────
@@ -423,12 +445,11 @@ class ClosedLoopOrchestrator:
                     environment=self.deployment_environment,
                     incident_id=incident.incident_id,
                     correlation_id=incident.correlation_id,
-                    deployment_id=(
-                        f"deploy-{incident.incident_id[:8]}-c{cycle}"
-                    ),
+                    deployment_id=(f"deploy-{incident.incident_id[:8]}-c{cycle}"),
                 )
                 # Override idempotency_key per cycle to allow retry
                 from dataclasses import replace as dc_replace
+
                 deploy_req = dc_replace(
                     deploy_req,
                     idempotency_key=(
@@ -436,8 +457,9 @@ class ClosedLoopOrchestrator:
                     ),
                 )
 
-                last_deployment = await self.deployment_pipeline.deploy(
-                    deploy_req, incident,
+                last_deployment = await active_deployment_pipeline.deploy(
+                    deploy_req,
+                    incident,
                     cancellation_check=cancellation_check,
                     context=context,
                 )
@@ -459,16 +481,17 @@ class ClosedLoopOrchestrator:
                         },
                     )
                     failure_reason = f"Deployment failed on cycle {cycle}: {last_deployment.error}"
-                    
+
                     # Persist error metadata and ESCALATED status before returning
                     error_metadata = incident.metadata.copy() if incident.metadata else {}
                     error_metadata["closed_loop_failure_stage"] = "deployment"
                     error_metadata["closed_loop_failure_reason"] = last_deployment.error or ""
-                    
+
                     updated_incident = incident.with_status(IncidentStatus.ESCALATED)
                     from dataclasses import replace as dc_replace
+
                     updated_incident = dc_replace(updated_incident, metadata=error_metadata)
-                    
+
                     try:
                         await self.repository.save(updated_incident)
                     except Exception as status_exc:
@@ -476,8 +499,25 @@ class ClosedLoopOrchestrator:
                             "deployment_failure_status_persistence_failed",
                             status_error=str(status_exc),
                         )
-                    
+
                     return _failed(failure_reason)
+
+                if demo1_observe_only:
+                    reason = (
+                        "Demo 1 observe-only execution completed investigation, "
+                        "planning, policy evaluation, fake action execution, and "
+                        "fake deployment. Verification and resolution were skipped."
+                    )
+                    await self._update_status(incident, IncidentStatus.ESCALATED)
+                    await self._emit(
+                        INCIDENT_ESCALATED,
+                        {
+                            "incident_id": incident.incident_id,
+                            "execution_id": execution_id,
+                            "reason": reason,
+                        },
+                    )
+                    return _escalated(reason)
 
                 # ── Verification ──────────────────────────────────────────────
                 ver_plan = (
@@ -572,17 +612,18 @@ class ClosedLoopOrchestrator:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
-            
+
             # Persist error details to incident metadata before escalating
             error_metadata = incident.metadata.copy() if incident.metadata else {}
             error_metadata["closed_loop_error"] = str(exc)
             error_metadata["closed_loop_error_type"] = type(exc).__name__
-            
+
             # Update incident with error metadata and ESCALATED status
             updated_incident = incident.with_status(IncidentStatus.ESCALATED)
             from dataclasses import replace as dc_replace_incident
+
             updated_incident = dc_replace_incident(updated_incident, metadata=error_metadata)
-            
+
             try:
                 await self.repository.save(updated_incident)
             except Exception as status_exc:
@@ -590,7 +631,7 @@ class ClosedLoopOrchestrator:
                     "closed_loop_escalated_status_persistence_failed",
                     status_error=str(status_exc),
                 )
-            
+
             # Return failed result with exception details
             return ClosedLoopResult(
                 incident_id=incident.incident_id,
@@ -621,9 +662,7 @@ class ClosedLoopOrchestrator:
             resolved_at=datetime.now(UTC),
             duration_ms=duration_ms,
             execution_id=execution_id,
-            verification_result=(
-                outcome.verification_result if outcome else None
-            ),
+            verification_result=(outcome.verification_result if outcome else None),
             summary=(
                 f"Incident {incident.incident_id} resolved after {cycle} cycle(s) "
                 f"in {duration_ms:.0f}ms."
@@ -697,10 +736,12 @@ def _default_verification_plan(incident: Incident) -> VerificationPlan:
         comparison_window_seconds=60.0,
         thresholds={"error_rate": 0.05},
         snapshot_before={
-            svc: {"error_rate": 1.0}   # assume degraded before
+            svc: {"error_rate": 1.0}  # assume degraded before
             for svc in incident.affected_services
         },
     )
+
+
 """ClosedLoopOrchestrator — the final autonomous incident lifecycle.
 
 Completes the closed loop:

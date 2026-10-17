@@ -30,6 +30,13 @@ The API uses OAuth 2.0/OpenID Connect bearer access tokens issued by the organiz
 
 Tokens are never accepted in query parameters and are never logged. The gateway passes a normalized `PrincipalContext`—subject, tenant, roles, scopes, authentication method, token expiry, and trace/correlation context—to services. Downstream services use their own service identity rather than forwarding user credentials to arbitrary integrations.
 
+The incident ingestion compatibility route also requires the dedicated
+`SENTINEL_INCIDENT_API_KEY` setting. Callers send its value in the
+`X-Sentinel-Incident-Key` header to `POST /api/v1/incidents`; the key is
+separate from database, GitHub, LLM, and cloud credentials. Submissions are
+rejected with `401` when the header is missing or invalid, and with `503` when
+the server has not been configured with its ingestion key.
+
 ## 2. Authorization
 
 Authorization combines role-based access control, OAuth scopes, tenant/environment boundaries, and policy evaluation for consequential operations. A route-level permission determines whether a caller may request an operation; PolicyService determines whether the requested action is allowed in its current workflow and environment context. API authorization never grants an agent additional tool capability.

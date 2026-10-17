@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -27,8 +28,19 @@ from backend.interfaces.fake_llm import (
 )
 from backend.interfaces.llm import LLMToolCall, LLMUnavailableError
 from backend.models.evidence import EvidenceCollection, EvidenceSourceKind
-from backend.models.incident import Incident, IncidentSeverity, IncidentStatus
-from backend.services.evidence_normalizer import EvidenceNormalizer
+from backend.models.incident import (
+    Incident,
+    IncidentSeverity,
+    IncidentSignal,
+    IncidentStatus,
+    SignalSource,
+    SignalType,
+)
+from backend.services.evidence_normalizer import (
+    EvidenceNormalizer,
+    NormalizedEvidence,
+    NormalizedEvidenceCollection,
+)
 from backend.services.evidence_orchestrator import EvidenceOrchestrator
 from backend.services.investigation_agent import (
     DeterministicInvestigationAgent,
@@ -36,8 +48,11 @@ from backend.services.investigation_agent import (
 )
 from backend.services.investigation_orchestrator import InvestigationOrchestrator
 from backend.services.llm_investigation_agent import (
+    _LLM_CONTEXT_MAX_TOTAL_CHARS,
+    _LLM_PROMPT_MAX_TOTAL_CHARS,
     EvidenceGroundingValidator,
     LLMInvestigationAgent,
+    _build_safe_incident_context,
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -91,6 +106,117 @@ def _rca_output_json(
             "reasoning_summary": "Evidence points to a recent deployment.",
         }
     )
+
+
+def _diagnostic_incident() -> Incident:
+    return replace(
+        _incident(symptoms=("Database connection pool exhausted", "Error rate elevated")),
+        signals=(
+            IncidentSignal(
+                signal_id="signal-1",
+                signal_type=SignalType.METRIC_THRESHOLD,
+                source=SignalSource.OTHER,
+                title="Pool exhausted",
+                description="No free database connections remain.",
+                severity=IncidentSeverity.HIGH,
+                received_at=_now(),
+                service="order-api",
+                environment="demo",
+                raw_payload={
+                    "pool": {"max": 10, "free": 0, "used": 10},
+                    "metrics": {"error_rate_pct": 18.0, "total_errors": 7},
+                    "failure_mode": "connection_leak",
+                    "image_version": "abc123",
+                    "password": "do-not-send",
+                },
+                labels={"failure_mode": "connection_leak", "service": "order-api"},
+            ),
+        ),
+        metadata={
+            "service": "order-api",
+            "version": "abc123",
+            "failure_mode": "connection_leak",
+            "pool": {"max": 10, "free": 0, "used": 10},
+            "metrics": {"error_rate_pct": 18.0, "total_errors": 7},
+            "api_key": "metadata-secret",
+            "email": "operator@example.com",
+        },
+    )
+
+
+def test_llm_context_redacts_secrets_and_personal_data() -> None:
+    incident = replace(
+        _diagnostic_incident(),
+        description="Operator alice@example.com supplied password=do-not-send.",
+    )
+    prompt = LLMInvestigationAgent(llm_provider=FakeLLMProvider())._build_evidence_prompt(
+        incident,
+        EvidenceNormalizer().normalize_collection(_empty_collection(incident.incident_id)),
+    )
+
+    assert "do-not-send" not in prompt
+    assert "metadata-secret" not in prompt
+    assert "operator@example.com" not in prompt
+    assert "[REDACTED]" in prompt or "[REDACTED_EMAIL]" in prompt
+
+
+def test_llm_context_allowlist_and_total_limit_bound_oversized_payloads() -> None:
+    incident = replace(
+        _diagnostic_incident(),
+        metadata={
+            "metrics": {"error_rate_pct": 18.0, "unbounded": "x" * 100_000},
+            "unapproved": "y" * 100_000,
+        },
+    )
+
+    context = _build_safe_incident_context(incident)
+
+    assert len(context) <= _LLM_CONTEXT_MAX_TOTAL_CHARS
+    assert "unbounded" not in context
+    assert "unapproved" not in context
+
+
+def test_llm_context_preserves_demo_diagnostic_fields() -> None:
+    context = _build_safe_incident_context(_diagnostic_incident())
+
+    assert "connection_leak" in context
+    assert '"free":0' in context
+    assert "error_rate_pct" in context
+    assert "abc123" in context
+    assert "Database connection pool exhausted" in context
+
+
+def test_llm_prompt_redacts_and_bounds_normalized_evidence() -> None:
+    incident = _diagnostic_incident()
+    evidence = NormalizedEvidence(
+        evidence_id="evidence-1",
+        incident_id=incident.incident_id,
+        source="demo",
+        evidence_type="metrics",
+        timestamp=_now(),
+        title="Metric payload",
+        content="password=do-not-send " + "x" * 100_000,
+        service="order-api",
+        environment="demo",
+        resource=None,
+        version="abc123",
+        correlation_id=incident.correlation_id,
+        relevance_score=1.0,
+        confidence=1.0,
+    )
+    normalized = NormalizedEvidenceCollection(
+        incident_id=incident.incident_id,
+        items=(evidence,),
+    )
+
+    prompt = LLMInvestigationAgent(llm_provider=FakeLLMProvider())._build_evidence_prompt(
+        incident,
+        normalized,
+    )
+
+    assert len(prompt) <= _LLM_PROMPT_MAX_TOTAL_CHARS
+    assert "do-not-send" not in prompt
+    assert "[REDACTED]" in prompt
 
 
 # ── 13. Deterministic agent ─────────────────────────────────────────────────

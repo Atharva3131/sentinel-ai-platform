@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
 import structlog
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from backend.api.schemas.incident import (
     CreateIncidentRequest,
@@ -16,6 +17,7 @@ from backend.api.schemas.incident import (
     IncidentResponse,
     IncidentSignalResponse,
 )
+from backend.configuration import AppSettings
 from backend.db.repositories.incident import (
     IncidentPersistenceError,
     PostgreSQLIncidentRepository,
@@ -35,6 +37,8 @@ from backend.services.incident_ingestion import (
 )
 
 log = structlog.get_logger(__name__)
+
+_INCIDENT_API_KEY_HEADER = "X-Sentinel-Incident-Key"
 
 
 router = APIRouter(
@@ -67,8 +71,13 @@ router = APIRouter(
 )
 async def create_incident(
     body: CreateIncidentRequest,
+    settings: FromDishka[AppSettings],
     ingestion_service: FromDishka[IncidentIngestionService],
     closed_loop_orchestrator: FromDishka[ClosedLoopOrchestrator],
+    incident_api_key: Annotated[
+        str | None,
+        Header(alias=_INCIDENT_API_KEY_HEADER),
+    ] = None,
 ) -> CreateIncidentResponse:
     """Accept an incident from any source (API, event bridge, monitoring adapter).
 
@@ -82,6 +91,7 @@ async def create_incident(
     lifecycle. Orchestration failures are logged but do not affect the 201
     response — the incident is already safely persisted.
     """
+    _authenticate_incident_submission(incident_api_key, settings)
     incident = _request_to_domain(body)
 
     bound_log = log.bind(
@@ -121,9 +131,7 @@ async def create_incident(
     bound_log.info(
         "incident_api_created",
         is_duplicate=result.is_duplicate,
-        existing_id=(
-            result.existing.incident_id if result.existing else None
-        ),
+        existing_id=(result.existing.incident_id if result.existing else None),
     )
 
     # Only trigger the closed-loop for genuinely new incidents.
@@ -153,15 +161,35 @@ async def create_incident(
                 error_type=type(exc).__name__,
                 incident_id=result.incident.incident_id,
             )
-            
 
     return CreateIncidentResponse(
         incident=_domain_to_response(result.incident),
         is_duplicate=result.is_duplicate,
-        existing_incident_id=(
-            result.existing.incident_id if result.existing else None
-        ),
+        existing_incident_id=(result.existing.incident_id if result.existing else None),
     )
+
+
+def _authenticate_incident_submission(
+    provided_key: str | None,
+    settings: AppSettings,
+) -> None:
+    """Require the dedicated shared key before persisting or processing an incident."""
+    configured_key = settings.incident_api_key
+    if configured_key is None or not configured_key.get_secret_value():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Incident submission authentication is not configured",
+        )
+
+    if provided_key is None or not secrets.compare_digest(
+        provided_key,
+        configured_key.get_secret_value(),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid incident API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
 
 
 # ---------------------------------------------------------------------------
