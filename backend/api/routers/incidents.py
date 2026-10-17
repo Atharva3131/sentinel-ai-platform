@@ -130,7 +130,15 @@ async def create_incident(
     # Duplicates already have an active orchestration cycle in progress.
     if not result.is_duplicate:
         try:
-            await closed_loop_orchestrator.run(result.incident)
+            closed_loop_result = await closed_loop_orchestrator.run(result.incident)
+            if closed_loop_result is not None:
+                bound_log.info(
+                    "closed_loop_completed",
+                    status=closed_loop_result.status,
+                    cycles=closed_loop_result.cycles,
+                    duration_ms=closed_loop_result.duration_ms,
+                    failure_reason=closed_loop_result.failure_reason,
+                )
 
         except Exception as exc:
             # The incident is persisted — log the failure and return 201.

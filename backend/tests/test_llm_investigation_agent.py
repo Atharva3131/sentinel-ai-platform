@@ -34,6 +34,7 @@ from backend.services.investigation_agent import (
     DeterministicInvestigationAgent,
     EvidenceRequestTool,
 )
+from backend.services.investigation_orchestrator import InvestigationOrchestrator
 from backend.services.llm_investigation_agent import (
     EvidenceGroundingValidator,
     LLMInvestigationAgent,
@@ -270,6 +271,35 @@ async def test_llm_agent_without_tools_skips_tool_rounds() -> None:
     # Should have made exactly 2 calls: the main request + the forced structured answer
     assert fake_llm.call_count <= 3
     assert output.rca is not None
+
+
+@pytest.mark.asyncio
+async def test_investigation_orchestrator_delegates_to_llm_agent() -> None:
+    """The production-capable orchestrator path uses the configured LLM agent."""
+    inc = _incident()
+    evidence_orchestrator = EvidenceOrchestrator(providers=[FakeMetricsProvider()])
+    fake_llm = FakeLLMProvider(
+        responses=[_rca_output_json(root_cause="LLM-selected cause")]
+    )
+    llm_agent = LLMInvestigationAgent(
+        llm_provider=fake_llm,
+        evidence_tool=None,
+        max_tool_rounds=0,
+    )
+    investigation = InvestigationOrchestrator(
+        evidence_orchestrator=evidence_orchestrator,
+        hypothesis_engine=HypothesisEngine(
+            generator=DeterministicHypothesisGenerator()
+        ),
+        investigation_agent=llm_agent,
+        max_iterations=1,
+        confidence_threshold=0.0,
+    )
+
+    result = await investigation.investigate(inc)
+
+    assert result.rca.root_cause_title == "LLM-selected cause"
+    assert fake_llm.call_count > 0
 
 
 # ── 15. Evidence-grounding validation ──────────────────────────────────────

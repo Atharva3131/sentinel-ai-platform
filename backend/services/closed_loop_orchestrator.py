@@ -285,6 +285,13 @@ class ClosedLoopOrchestrator:
                     )
 
                 rca = investigation_result.rca
+                bound_log.info(
+                    "closed_loop_rca_ready",
+                    cycle=cycle,
+                    rca_id=rca.rca_id,
+                    confidence=rca.confidence,
+                    has_root_cause=rca.has_root_cause,
+                )
 
                 # ── Azure remediation (if wired and incident matches Demo 1 pattern) ──────
                 # This is an optional early-exit path for specific incidents that can be
@@ -325,11 +332,65 @@ class ClosedLoopOrchestrator:
                 if self.remediation_planner is not None:
                     try:
                         plan = await self.remediation_planner(incident, rca)
-                        await self.remediation_engine.execute_plan(
+                        bound_log.info(
+                            "remediation_plan_created",
+                            cycle=cycle,
+                            plan_id=plan.plan_id,
+                            rca_id=plan.rca_id,
+                            action_count=plan.action_count,
+                            stage_count=len(plan.stages),
+                            risk_levels=sorted({
+                                action.risk_level.value for action in plan.actions
+                            }),
+                        )
+                        remediation_result = await self.remediation_engine.execute_plan(
                             plan, incident,
                             correlation_id=incident.correlation_id,
                             context=context,
                         )
+                        if not remediation_result.succeeded:
+                            failure_reason = (
+                                remediation_result.failure_reason
+                                or f"Remediation was not successful on cycle {cycle}."
+                            )
+                            bound_log.warning(
+                                "remediation_result_rejected",
+                                cycle=cycle,
+                                plan_id=plan.plan_id,
+                                actions_attempted=remediation_result.actions_attempted,
+                                actions_succeeded=remediation_result.actions_succeeded,
+                                actions_failed=remediation_result.actions_failed,
+                                policy_rejected_action_ids=remediation_result.metadata.get(
+                                    "policy_rejected_action_ids", []
+                                ),
+                                reason=failure_reason,
+                            )
+                            error_metadata = incident.metadata.copy() if incident.metadata else {}
+                            error_metadata["closed_loop_failure_stage"] = "remediation"
+                            error_metadata["closed_loop_failure_reason"] = failure_reason
+                            error_metadata["remediation_plan_id"] = plan.plan_id
+                            error_metadata["remediation_result"] = {
+                                "succeeded": remediation_result.succeeded,
+                                "actions_attempted": remediation_result.actions_attempted,
+                                "actions_succeeded": remediation_result.actions_succeeded,
+                                "actions_failed": remediation_result.actions_failed,
+                                "policy_rejected_action_ids": remediation_result.metadata.get(
+                                    "policy_rejected_action_ids", []
+                                ),
+                            }
+                            from dataclasses import replace as dc_replace
+                            updated_incident = dc_replace(
+                                incident.with_status(IncidentStatus.ESCALATED),
+                                metadata=error_metadata,
+                            )
+                            try:
+                                await self.repository.save(updated_incident)
+                            except Exception as status_exc:
+                                bound_log.exception(
+                                    "remediation_failure_status_persistence_failed",
+                                    status_error=str(status_exc),
+                                )
+                            return _failed(failure_reason)
                     except Exception as exc:
                         bound_log.error("remediation_failed", cycle=cycle, error=str(exc))
                         failure_reason = f"Remediation failed on cycle {cycle}: {exc}"
@@ -673,4 +734,3 @@ Idempotency:
   * The incident repository is used to detect already-resolved incidents
     before starting a new cycle.
 """
-

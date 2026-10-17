@@ -55,6 +55,7 @@ from backend.models.remediation import (
     RemediationAction,
     RemediationActionType,
     RemediationPlan,
+    RemediationResult,
 )
 from backend.models.resolution import ResolutionStatus
 from backend.models.validation import VerificationPlan
@@ -1439,6 +1440,63 @@ async def test_closed_loop_remediation_failure_persists_status() -> None:
     assert "closed_loop_failure_reason" in saved.metadata
     assert result.failure_reason is not None
     assert "Planner connection failed" in saved.metadata["closed_loop_failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_closed_loop_stops_before_deployment_when_remediation_is_rejected() -> None:
+    """A failed remediation result must prevent deployment and persist its reason."""
+    repo = InMemoryIncidentRepository()
+    inc = _incident(inc_id="remediation-rejected-test")
+    plan = await _noop_planner(inc, None)
+
+    class RejectedRemediationEngine:
+        async def execute_plan(
+            self, plan: Any, incident: Any, **kwargs: Any
+        ) -> RemediationResult:
+            return RemediationResult(
+                plan_id=plan.plan_id,
+                incident_id=incident.incident_id,
+                succeeded=False,
+                actions_attempted=0,
+                actions_succeeded=0,
+                actions_failed=0,
+                actions_rolled_back=0,
+                duration_ms=1.0,
+                failure_reason="One or more actions were rejected by policy.",
+                metadata={"policy_rejected_action_ids": [plan.actions[0].action_id]},
+            )
+
+    class DeploymentMustNotRun:
+        called = False
+
+        async def deploy(self, request: Any, incident: Any, **kwargs: Any) -> Any:
+            self.called = True
+            raise AssertionError("deployment must not run after rejected remediation")
+
+    deployment = DeploymentMustNotRun()
+
+    async def rejected_planner(incident: Incident, rca: Any) -> RemediationPlan:
+        return plan
+
+    orchestrator = ClosedLoopOrchestrator(
+        investigation=_make_investigation(),
+        remediation_engine=RejectedRemediationEngine(),  # type: ignore[arg-type]
+        deployment_pipeline=deployment,  # type: ignore[arg-type]
+        verification=_make_verification_coordinator(),
+        repository=repo,
+        remediation_planner=rejected_planner,
+    )
+
+    result = await orchestrator.run(inc, execution_id="exec-remediation-rejected")
+
+    assert result.status == "failed"
+    assert deployment.called is False
+    saved = await repo.get(inc.incident_id)
+    assert saved is not None
+    assert saved.status == IncidentStatus.ESCALATED
+    assert saved.metadata["closed_loop_failure_stage"] == "remediation"
+    assert saved.metadata["remediation_plan_id"] == plan.plan_id
+    assert saved.metadata["remediation_result"]["succeeded"] is False
 
 
 # ── 29. Deployment failure persists ESCALATED status ───────────────────────

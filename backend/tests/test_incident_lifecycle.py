@@ -497,6 +497,8 @@ async def test_policy_rejection_blocks_execution() -> None:
 
     assert result.actions_attempted == 0
     assert result.actions_succeeded == 0
+    assert result.succeeded is False
+    assert result.metadata["policy_rejected_action_ids"] == [a.action_id]
 
 
 @pytest.mark.asyncio

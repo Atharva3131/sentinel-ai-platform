@@ -81,8 +81,10 @@ from backend.services.closed_loop_orchestrator import ClosedLoopOrchestrator
 from backend.services.deployment_pipeline import DeploymentPipeline
 from backend.services.evidence_orchestrator import EvidenceOrchestrator
 from backend.services.incident_ingestion import IncidentIngestionService
+from backend.services.investigation_agent import EvidenceRequestTool
 from backend.services.investigation_evaluation import InvestigationEvaluator
 from backend.services.investigation_orchestrator import InvestigationOrchestrator
+from backend.services.llm_investigation_agent import LLMInvestigationAgent
 from backend.services.verification_coordinator import VerificationCoordinator
 from backend.telemetry import TelemetryHandle
 
@@ -408,10 +410,23 @@ class ApplicationProvider(Provider):
         return RetrievalPipeline(provider=retriever, cache=redis_cache)
 
     @provide(scope=Scope.APP)
+    def llm_investigation_agent(
+        self,
+        llm_provider: LLMProvider,
+        evidence_orchestrator: EvidenceOrchestrator,
+    ) -> LLMInvestigationAgent:
+        """Return the production LLM investigation agent with evidence tooling."""
+        return LLMInvestigationAgent(
+            llm_provider=llm_provider,
+            evidence_tool=EvidenceRequestTool(orchestrator=evidence_orchestrator),
+        )
+
+    @provide(scope=Scope.APP)
     def investigation_orchestrator(
         self,
         evidence_orchestrator: EvidenceOrchestrator,
         hypothesis_engine: HypothesisEngine,
+        llm_investigation_agent: LLMInvestigationAgent,
         event_publisher: RedisWorkflowEventPublisher,
         graph_pipeline: RetrievalPipeline | None,
     ) -> InvestigationOrchestrator:
@@ -424,6 +439,7 @@ class ApplicationProvider(Provider):
         return InvestigationOrchestrator(
             evidence_orchestrator=evidence_orchestrator,
             hypothesis_engine=hypothesis_engine,
+            investigation_agent=llm_investigation_agent,
             event_emitter=event_publisher,
             retrieval_pipeline=graph_pipeline,
         )

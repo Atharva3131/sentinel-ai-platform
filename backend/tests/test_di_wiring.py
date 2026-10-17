@@ -17,21 +17,24 @@ from dishka import Provider, Scope, provide
 
 from backend.application.factory import create_application
 from backend.application.health import HealthService, ReadinessReport
+from backend.application.providers import ApplicationProvider
 from backend.configuration.settings import AppSettings, OpenTelemetrySettings
 from backend.db.repositories.incident import PostgreSQLIncidentRepository
 from backend.evaluation.engine import EvaluationEngine
 from backend.evaluation.registry import EvaluationRegistry
+from backend.interfaces.fake_llm import FakeLLMProvider
 from backend.interfaces.health import HealthCheckResult, HealthStatus
 from backend.interfaces.llm import LLMProvider
 from backend.models.evidence import EvidenceCollection
 from backend.models.hypothesis import RootCauseAnalysis
 from backend.models.incident import Incident, IncidentSeverity, IncidentStatus
 from backend.services.evidence_normalizer import EvidenceNormalizer
-from backend.services.evidence_orchestrator import EvidenceOrchestrationResult
+from backend.services.evidence_orchestrator import EvidenceOrchestrationResult, EvidenceOrchestrator
 from backend.services.incident_ingestion import IncidentIngestionService
 from backend.services.incident_repository import InMemoryIncidentRepository
 from backend.services.investigation_evaluation import InvestigationEvaluator
 from backend.services.investigation_orchestrator import InvestigationResult
+from backend.services.llm_investigation_agent import LLMInvestigationAgent
 
 # ── Shared DI overrides ───────────────────────────────────────────────────
 
@@ -119,6 +122,17 @@ def _test_settings() -> AppSettings:
         neo4j={"enabled": False},
         opentelemetry=OpenTelemetrySettings(enabled=False),
     )
+
+
+def test_application_provider_wires_llm_investigation_agent() -> None:
+    """The production provider factory supplies the LLM investigation agent."""
+    provider = ApplicationProvider()
+    agent = provider.llm_investigation_agent(
+        FakeLLMProvider(responses=[]), EvidenceOrchestrator()
+    )
+
+    assert isinstance(agent, LLMInvestigationAgent)
+    assert agent.evidence_tool is not None
 
 
 # ── 9. PostgreSQL DI wiring ───────────────────────────────────────────────

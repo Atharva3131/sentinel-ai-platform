@@ -240,7 +240,24 @@ class RemediationEngine:
             1 for r in action_results.values()
             if r.get("status") not in ("skipped", "policy_rejected")
         )
-        overall_success = failed == 0 and rolled_back == 0 and total_attempted > 0
+        policy_rejected_ids = [
+            action_id
+            for action_id, result in action_results.items()
+            if result.get("status") == "policy_rejected"
+        ]
+        overall_success = (
+            failed == 0
+            and rolled_back == 0
+            and not policy_rejected_ids
+            and total_attempted > 0
+        )
+        failure_reason = None
+        if not overall_success:
+            failure_reason = (
+                "One or more actions were rejected by policy."
+                if policy_rejected_ids
+                else "One or more actions failed."
+            )
 
         return RemediationResult(
             plan_id=plan.plan_id,
@@ -252,7 +269,8 @@ class RemediationEngine:
             actions_rolled_back=rolled_back,
             duration_ms=duration_ms,
             action_results=action_results,
-            failure_reason=None if overall_success else "One or more actions failed.",
+            failure_reason=failure_reason,
+            metadata={"policy_rejected_action_ids": policy_rejected_ids},
         )
 
     async def _execute_stage(

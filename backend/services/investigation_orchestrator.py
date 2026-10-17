@@ -67,6 +67,7 @@ from backend.services.incident_events import (
     RCA_INCONCLUSIVE,
     ROOT_CAUSE_IDENTIFIED,
 )
+from backend.services.investigation_agent import InvestigationAgent
 
 log = structlog.get_logger(__name__)
 
@@ -184,6 +185,7 @@ class InvestigationOrchestrator:
 
     evidence_orchestrator: EvidenceOrchestrator
     hypothesis_engine: HypothesisEngine
+    investigation_agent: InvestigationAgent | None = None
     event_emitter: IncidentEventEmitter | None = None
     additional_selector: AdditionalEvidenceSelectorProtocol = field(
         default_factory=AdditionalEvidenceSelectorProtocol
@@ -357,14 +359,29 @@ class InvestigationOrchestrator:
 
             # ── Hypothesis generation + RCA ───────────────────────────────
             try:
-                rca = await asyncio.wait_for(
-                    self.hypothesis_engine.analyze(
-                        incident,
-                        merged_collection,
-                        context=context,
-                    ),
-                    timeout=self.iteration_timeout_seconds,
-                )
+                if self.investigation_agent is not None:
+                    normalized = self.evidence_orchestrator.normalizer.normalize_collection(
+                        merged_collection
+                    )
+                    agent_output = await asyncio.wait_for(
+                        self.investigation_agent.investigate(
+                            incident,
+                            merged_collection,
+                            normalized,
+                            context=context,
+                        ),
+                        timeout=self.iteration_timeout_seconds,
+                    )
+                    rca = agent_output.rca
+                else:
+                    rca = await asyncio.wait_for(
+                        self.hypothesis_engine.analyze(
+                            incident,
+                            merged_collection,
+                            context=context,
+                        ),
+                        timeout=self.iteration_timeout_seconds,
+                    )
             except TimeoutError:
                 bound_log.warning("iteration_rca_timeout", iteration=iteration)
                 timed_out = True

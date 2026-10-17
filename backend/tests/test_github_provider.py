@@ -1147,7 +1147,8 @@ async def test_end_to_end_remediation_flow_with_mocked_github() -> None:
     # pr_create (HIGH) = policy_rejected
     assert result.actions_attempted == 3
     assert result.actions_failed == 0
-    assert result.succeeded is True
+    assert result.succeeded is False
+    assert result.metadata["policy_rejected_action_ids"] == [plan.actions[-1].action_id]
 
     # Verify PR action was policy-rejected
     assert plan.actions[-1].metadata["github_operation"] == "pull_request_create"
