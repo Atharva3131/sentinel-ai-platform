@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from backend.api.router import build_api_router
 from backend.application.providers import build_root_container
 from backend.configuration import AppSettings, get_settings
+from backend.dashboard import mount_dashboard
 from backend.logging import configure_logging
 from backend.middleware import ExceptionLoggingMiddleware, RequestContextMiddleware
 from backend.telemetry import configure_telemetry
@@ -40,6 +41,7 @@ def create_application(
     app.add_middleware(ExceptionLoggingMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(build_api_router())
+    mount_dashboard(app, resolved_settings)
 
     telemetry = configure_telemetry(resolved_settings, app)
 

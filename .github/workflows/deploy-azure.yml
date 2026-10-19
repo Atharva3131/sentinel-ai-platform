@@ -55,6 +55,7 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Build image in Azure Container Registry
+        id: build_image
         run: |
           az acr build \
             --registry "$AZURE_ACR" \
@@ -62,13 +63,18 @@ jobs:
             .
 
       - name: Deploy to Azure Container Apps
+        id: deploy
+        continue-on-error: true
         run: |
+          set -o pipefail
           az containerapp update \
             --name "$AZURE_CONTAINER_APP" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$AZURE_ACR.azurecr.io/$IMAGE_NAME:${{ github.sha }}"
+            --image "$AZURE_ACR.azurecr.io/$IMAGE_NAME:${{ github.sha }}" \
+            2>&1 | tee "$RUNNER_TEMP/azure-deployment.log"
 
       - name: Verify deployment
+        if: ${{ steps.deploy.outcome == 'success' }}
         run: |
           echo "Deployed commit: ${{ github.sha }}"
 
@@ -100,3 +106,34 @@ jobs:
 
           echo "Health check failed."
           exit 1
+
+      - name: Write deployment summary
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build_image.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          IMAGE_TAG: ${{ env.AZURE_ACR }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          if [[ "$BUILD_OUTCOME" == "success" ]]; then
+            echo "- Image build and push: SUCCESS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Image build and push: FAILED" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ "$DEPLOY_OUTCOME" == "success" ]]; then
+            echo "- Azure deployment: SUCCESS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Azure deployment: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Azure error:" >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f "$RUNNER_TEMP/azure-deployment.log" ]]; then
+              {
+                echo '```text'
+                cat "$RUNNER_TEMP/azure-deployment.log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "  Deployment did not run or produced no captured output." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "- Published image tag: \`$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
