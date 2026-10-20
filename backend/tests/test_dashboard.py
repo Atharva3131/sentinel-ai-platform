@@ -8,6 +8,31 @@ from typing import Any
 import pytest
 
 from backend import dashboard
+from backend.configuration import AppSettings
+
+
+def test_dashboard_initial_snapshot_is_demo_data_without_network_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("initial dashboard render must not call the network")
+
+    monkeypatch.setattr(dashboard, "_refresh_dashboard", fail_if_called)
+
+    built = dashboard.build_dashboard(AppSettings())
+    config = built.get_config_file()
+    component_values = [
+        component.get("props", {}).get("value")
+        for component in config["components"]
+    ]
+
+    assert any("DEMO DATA" in str(value) for value in component_values)
+    assert any("Database connection pool exhausted" in str(value) for value in component_values)
+    assert any("842" in str(value) and "98" in str(value) for value in component_values)
+    assert not any(
+        any(target[1] == "load" for target in dependency.get("targets", []))
+        for dependency in config.get("dependencies", [])
+    )
 
 
 @pytest.mark.asyncio

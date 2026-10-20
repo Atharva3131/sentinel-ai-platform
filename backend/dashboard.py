@@ -15,6 +15,63 @@ from backend.configuration import AppSettings
 _REQUEST_TIMEOUT_SECONDS = 5.0
 _REFRESH_TIMEOUT_SECONDS = 10.0
 
+_DEMO_HEALTH = """## DEMO DATA — initial dashboard snapshot
+
+These values are simulated for demonstration and are not live telemetry.
+
+- **Sentinel API:** `HEALTHY` — API responding normally
+- **Order API:** `HEALTHY` — read-only demo endpoint available
+- **Active incident:** `HIGH` — database connection pool exhausted
+
+Metrics below are simulated: error rate **2.4%**, p95 latency **842 ms**, and
+connection pool usage **98% (49/50 connections)**.
+"""
+
+_DEMO_INCIDENTS = [
+    [
+        "2026-10-20 09:42 UTC",
+        "HIGH",
+        "ACTIVE",
+        "Database connection pool exhausted",
+        "Sentinel API, Order API, PostgreSQL",
+        "demo-inc-2026-1020-001",
+    ]
+]
+
+_DEMO_RCA = """### DEMO DATA — probable root cause
+
+The Order API experienced a burst of slow database queries, causing requests to
+hold connections longer than normal. The application pool reached **49/50
+connections**, producing connection acquisition timeouts and elevated request
+failures. This is simulated incident data for the demo, not a live investigation.
+"""
+
+_DEMO_PLAN = """### DEMO DATA — remediation plan
+
+1. Reduce query latency and terminate stale transactions.
+2. Temporarily increase the pool ceiling after confirming database capacity.
+3. Add connection-acquisition timeout and pool saturation alerts.
+4. Verify error rate and p95 latency return to baseline before closing the incident.
+
+This plan is illustrative only; the dashboard does not execute remediation.
+"""
+
+_DEMO_METRICS = json.dumps(
+    {
+        "data_label": "DEMO DATA",
+        "simulated": True,
+        "error_rate_percent": 2.4,
+        "p95_latency_ms": 842,
+        "connection_pool": {"used": 49, "capacity": 50, "usage_percent": 98},
+    },
+    indent=2,
+)
+
+
+def _initial_dashboard_values() -> tuple[str, list[list[str]], str, str, str]:
+    """Return the synchronous demo snapshot used for the first page render."""
+    return _DEMO_HEALTH, [row[:] for row in _DEMO_INCIDENTS], _DEMO_RCA, _DEMO_PLAN, _DEMO_METRICS
+
 
 def _url(value: str, path: str) -> str:
     return f"{value.rstrip('/')}/{path.lstrip('/')}"
@@ -217,15 +274,19 @@ def build_dashboard(settings: AppSettings) -> gr.Blocks:
         return await _refresh_dashboard(sentinel_base_url, order_api_url)
 
     dashboard: gr.Blocks = gr.Blocks(title="Sentinel AI Dashboard")
+    initial_health, initial_incidents, initial_rca, initial_plan, initial_metrics = (
+        _initial_dashboard_values()
+    )
     with dashboard:
         gr.Markdown(
             "# Sentinel AI Dashboard\n"
-            "Read-only operational view. Refreshes call existing Sentinel and Order "
-            "API read endpoints."
+            "Read-only operational view. The initial snapshot is **DEMO DATA**; "
+            "refreshes call existing Sentinel and Order API read endpoints."
         )
         refresh_button = gr.Button("Refresh dashboard", variant="primary")
-        health_output = gr.Markdown()
+        health_output = gr.Markdown(value=initial_health)
         incidents_output = gr.Dataframe(
+            value=initial_incidents,
             headers=[
                 "Detected",
                 "Severity",
@@ -241,17 +302,17 @@ def build_dashboard(settings: AppSettings) -> gr.Blocks:
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### RCA")
-                rca_output = gr.Markdown()
+                rca_output = gr.Markdown(value=initial_rca)
             with gr.Column():
                 gr.Markdown("### Remediation plan")
-                plan_output = gr.Markdown()
+                plan_output = gr.Markdown(value=initial_plan)
         metrics_output = gr.Code(
+            value=initial_metrics,
             label="Order API metrics (raw read-only response)",
             language="json",
         )
         outputs = [health_output, incidents_output, rca_output, plan_output, metrics_output]
         refresh_button.click(refresh, outputs=outputs)
-        dashboard.load(refresh, outputs=outputs)
     return dashboard
 
 
