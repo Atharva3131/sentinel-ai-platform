@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -10,6 +11,9 @@ import gradio as gr
 import httpx
 
 from backend.configuration import AppSettings
+
+_REQUEST_TIMEOUT_SECONDS = 5.0
+_REFRESH_TIMEOUT_SECONDS = 10.0
 
 
 def _url(value: str, path: str) -> str:
@@ -62,7 +66,13 @@ def _incident_table(items: list[dict[str, Any]]) -> list[list[str]]:
     ]
 
 
-def _incident_detail(items: list[dict[str, Any]]) -> tuple[str, str]:
+def _incident_detail(
+    items: list[dict[str, Any]],
+    error: str | None = None,
+) -> tuple[str, str]:
+    if error:
+        unavailable = f"### UNAVAILABLE\n\nSentinel incident data could not be loaded: {error}"
+        return unavailable, unavailable
     if not items:
         return (
             "### DEMO/MOCK DATA\n\nNo incidents were returned by the Sentinel API.",
@@ -111,7 +121,91 @@ async def _get_json(
         payload = response.json()
         return (payload if isinstance(payload, dict) else {"value": payload}), None
     except Exception as exc:  # Dashboard failures must not take down the API.
-        return None, f"{type(exc).__name__}: {exc}"
+        # Do not render exception details: some HTTP client errors can include a URL.
+        return None, type(exc).__name__
+
+
+async def _refresh_dashboard(
+    sentinel_base_url: str,
+    order_api_url: str,
+) -> tuple[str, list[list[str]], str, str, str]:
+    """Fetch dashboard data with bounded, read-only upstream calls."""
+    timeout = httpx.Timeout(_REQUEST_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        requests = [
+            _get_json(client, _url(sentinel_base_url, "/health")),
+            _get_json(client, _url(sentinel_base_url, "/api/v1/incidents?limit=50")),
+        ]
+        if order_api_url:
+            requests.extend(
+                [
+                    _get_json(client, _url(order_api_url, "/health")),
+                    _get_json(client, _url(order_api_url, "/metrics/raw")),
+                ]
+            )
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*requests),
+                timeout=_REFRESH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            timeout_error = (
+                f"refresh timed out after {_REFRESH_TIMEOUT_SECONDS:g} seconds"
+            )
+            results = [(None, timeout_error) for _ in requests]
+
+    health, health_error = results[0]
+    incidents_payload, incidents_error = results[1]
+    if order_api_url:
+        order_health, order_health_error = results[2]
+        order_metrics, metrics_error = results[3]
+        order_errors = [
+            f"health: {order_health_error}" if order_health_error else None,
+            f"metrics: {metrics_error}" if metrics_error else None,
+        ]
+        order_error = "; ".join(error for error in order_errors if error) or None
+    else:
+        order_health = None
+        order_metrics = None
+        order_error = "SENTINEL_DEMO1__BASE_URL is not configured"
+
+    incidents: list[dict[str, Any]] = []
+    if incidents_error is None:
+        candidate_incidents = (incidents_payload or {}).get("items", [])
+        if isinstance(candidate_incidents, list):
+            incidents = candidate_incidents
+        else:
+            incidents_error = "invalid incidents payload"
+
+    sentinel_status = str((health or {}).get("status", "UNAVAILABLE")).upper()
+    order_status = str((order_health or {}).get("status", "UNAVAILABLE")).upper()
+    health_lines = [
+        "## Current service health (live read-only probes)",
+        f"- **Sentinel API:** `{sentinel_status}`"
+        + (f" — {health_error}" if health_error else ""),
+        f"- **Order API:** `{order_status}`"
+        + (f" — {order_error}" if order_error else ""),
+        "\nHistorical incident statuses below are persisted outcomes and do not "
+        "represent current health.",
+    ]
+    if incidents_error:
+        health_lines.insert(
+            2,
+            f"- **Sentinel incidents:** `UNAVAILABLE` — {incidents_error}",
+        )
+
+    metrics_text = _pretty(order_metrics) if order_metrics else (
+        "Unavailable. " + (order_error or "No metrics payload returned.")
+    )
+    rca_text, plan_text = _incident_detail(incidents, incidents_error)
+    return (
+        "\n".join(health_lines),
+        _incident_table(incidents),
+        rca_text,
+        plan_text,
+        metrics_text,
+    )
 
 
 def build_dashboard(settings: AppSettings) -> gr.Blocks:
@@ -120,51 +214,7 @@ def build_dashboard(settings: AppSettings) -> gr.Blocks:
     order_api_url = settings.demo1.base_url
 
     async def refresh() -> tuple[str, list[list[str]], str, str, str]:
-        timeout = httpx.Timeout(5.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            health, health_error = await _get_json(client, _url(sentinel_base_url, "/health"))
-            incidents_payload, _incidents_error = await _get_json(
-                client, _url(sentinel_base_url, "/api/v1/incidents?limit=50")
-            )
-
-            order_health: dict[str, Any] | None = None
-            order_metrics: dict[str, Any] | None = None
-            order_error: str | None = None
-            if order_api_url:
-                order_health, order_error = await _get_json(client, _url(order_api_url, "/health"))
-                order_metrics, metrics_error = await _get_json(
-                    client, _url(order_api_url, "/metrics/raw")
-                )
-                if metrics_error and not order_error:
-                    order_error = f"metrics: {metrics_error}"
-            else:
-                order_error = "SENTINEL_DEMO1__BASE_URL is not configured"
-
-        incidents = (incidents_payload or {}).get("items", [])
-        if not isinstance(incidents, list):
-            incidents = []
-        sentinel_status = (health or {}).get("status", "UNAVAILABLE").upper()
-        order_status = (order_health or {}).get("status", "UNAVAILABLE").upper()
-        health_lines = [
-            "## Current service health (live read-only probes)",
-            f"- **Sentinel API:** `{sentinel_status}`"
-            + (f" — {health_error}" if health_error else ""),
-            f"- **Order API:** `{order_status}`"
-            + (f" — {order_error}" if order_error else ""),
-            "\nHistorical incident statuses below are persisted outcomes and do not "
-            "represent current health.",
-        ]
-        metrics_text = _pretty(order_metrics) if order_metrics else (
-            "Unavailable. " + (order_error or "No metrics payload returned.")
-        )
-        rca_text, plan_text = _incident_detail(incidents)
-        return (
-            "\n".join(health_lines),
-            _incident_table(incidents),
-            rca_text,
-            plan_text,
-            metrics_text,
-        )
+        return await _refresh_dashboard(sentinel_base_url, order_api_url)
 
     dashboard: gr.Blocks = gr.Blocks(title="Sentinel AI Dashboard")
     with dashboard:
